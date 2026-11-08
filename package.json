@@ -1,0 +1,36 @@
+{
+  "name": "freebuffs",
+  "version": "1.0.0",
+  "description": "freebuff supervisor: multi-account sessions that keep themselves running, with a side monitor",
+  "license": "MIT",
+  "bin": {
+    "sfreebuff": "bin/sfreebuff.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "install.sh",
+    "wait-and-poweroff.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "start": "node bin/sfreebuff.js"
+  },
+  "keywords": [
+    "freebuff",
+    "supervisor",
+    "cli",
+    "tui"
+  ],
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}
