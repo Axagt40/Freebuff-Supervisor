@@ -1093,3 +1093,58 @@ test('a session state that never clears stops for a person instead of looping', 
   assert.equal(critical.length, 1)
   assert.match(critical[0], /keeps ending the session/)
 })
+
+test('a new session from home keeps the picker, and its restart recovers the project folder', async () => {
+  const home = tempHome()
+  const project = path.join(home, 'project')
+  fs.mkdirSync(project, { recursive: true })
+  state.saveState({
+    version: 1,
+    createdAt: new Date().toISOString(),
+    accounts: [],
+    sessions: [{
+      id: 'old-session',
+      accountId: 'account-1',
+      cwd: project,
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+      exitCode: 0,
+      exitSignal: null,
+      note: null
+    }],
+    lastAccountId: null,
+    lastAccountByCwd: {}
+  })
+
+  const seen = []
+  // The home folder is exactly where freebuff would show the picker.
+  await supervise.supervise({
+    run: async (info) => {
+      seen.push(info.cwd)
+      return { code: 0, signal: null, elapsedMs: 100, accountId: 'account-1' }
+    },
+    cwd: os.homedir(),
+    forever: false,
+    env: {}
+  })
+
+  assert.deepEqual(
+    seen,
+    [os.homedir()],
+    'a new session leaves the folder for the person to pick'
+  )
+
+  const restarted = []
+  await supervise.supervise({
+    baseBackoffMs: 10,
+    env: {},
+    run: async (info) => {
+      restarted.push(info.cwd)
+      if (info.attempt >= 2) return { code: 0, signal: null, sessionId: 'ok', elapsedMs: 1000 }
+      return { code: 1, signal: null, sessionId: 's1', elapsedMs: 600_000 }
+    },
+    cwd: os.homedir()
+  })
+
+  assert.deepEqual(restarted, [os.homedir(), project], 'the restart continues in the project')
+})

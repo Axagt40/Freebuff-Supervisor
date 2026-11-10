@@ -88,5 +88,33 @@ test('the state is described in words a person can read', () => {
   assert.match(limits.describe({ kind: 'session-limit' }), /used up/)
   assert.match(limits.describe({ kind: 'session-ended' }), /new session/)
   assert.match(limits.describe({ kind: 'capacity' }), /busy/)
+  assert.match(limits.describe({ kind: 'timeout' }), /network timeout/)
   assert.match(limits.describe({ kind: 'none' }), /normally/)
+})
+
+test('a dropped request is answered by sending the message again', () => {
+  // The exact error box freebuff shows after a network timeout.
+  const verdict = limits.detect([
+    'Connection timed out: no data was received from the server for 5 minutes, so the request was aborted.',
+    'This can be a slow model start on our side, or a connection dropped in transit (VPN, proxy, firewall, or flaky network).',
+    'Retrying your message usually works. If it keeps happening, try a different model, or check your network/VPN/proxy.'
+  ].join('\n'))
+
+  assert.equal(verdict.kind, 'timeout')
+  assert.equal(verdict.ends, false, 'the session itself is still alive')
+  assert.equal(verdict.wait, false, 'no quota reset is involved')
+  assert.equal(verdict.retype, true, 'typing the message again starts a new turn')
+  assert.ok(verdict.delayMs > 0)
+})
+
+test('a failed connection is not ordinary agent prose', () => {
+  assert.equal(
+    limits.detect('Couldn\'t reach the server after retrying. Check your connection and try again.').kind,
+    'timeout'
+  )
+  assert.equal(
+    limits.detect('I added a timeout to the request and the tests pass.').kind,
+    'none',
+    'talking about a timeout is not one'
+  )
 })

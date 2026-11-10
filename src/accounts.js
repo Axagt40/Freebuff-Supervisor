@@ -1,6 +1,7 @@
 'use strict'
 
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 const { execFileSync } = require('child_process')
 const { paths, defaultConfigDir } = require('./paths')
@@ -12,6 +13,80 @@ const DEFAULT_EXPIRY_GRACE_MINUTES = 15
 
 function accountConfigDir (account) {
   return account.configDir || path.join(paths().accountsDir, account.id, 'config')
+}
+
+/**
+ * True when freebuff would open its project picker instead of a chat.
+ *
+ * freebuff's own check is `path.relative(startCwd, homeDir)` being empty or a
+ * path inside home: the picker appears when the session starts in the home
+ * folder or in an ancestor of it. Those folders are not a project, so an
+ * unattended restart that starts there can never leave the folder list.
+ */
+function isProjectPickerFolder (dir, home = os.homedir()) {
+  if (!dir) return false
+  const relative = path.relative(path.resolve(dir), path.resolve(home))
+  return relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+/**
+ * Folders this machine has used before, most recently used first.
+ *
+ * The supervisor's own session records and freebuff's `recent-projects.json`
+ * are both consulted: the latter is what the project picker itself writes when
+ * a folder is chosen, so a person's last pick survives a process restart.
+ * Missing folders are dropped instead of being resumed.
+ */
+function recentProjectFolders (state, home = os.homedir()) {
+  const found = new Map()
+  const add = (folder, at) => {
+    if (typeof folder !== 'string' || !folder) return
+    const resolved = path.resolve(folder)
+    if (isProjectPickerFolder(resolved, home)) return
+    try {
+      if (!fs.statSync(resolved).isDirectory()) return
+    } catch {
+      return
+    }
+    const stamp = Number.isFinite(at) ? at : 0
+    if (!found.has(resolved) || found.get(resolved) < stamp) {
+      found.set(resolved, stamp)
+    }
+  }
+
+  for (const session of (state && state.sessions) || []) {
+    add(session.cwd, Date.parse(session.startedAt) || 0)
+  }
+  for (const account of (state && state.accounts) || []) {
+    const raw = readJson(path.join(accountConfigDir(account), 'recent-projects.json'))
+    if (!Array.isArray(raw)) continue
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object') continue
+      add(entry.path, Number(entry.lastOpened) || 0)
+    }
+  }
+  for (const folder of Object.keys((state && state.lastAccountByCwd) || {})) {
+    add(folder, 0)
+  }
+
+  return [...found.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([folder]) => folder)
+}
+
+/**
+ * The folder a session should actually run in.
+ *
+ * A launch from home (a reboot service, an autostart entry, a kept-open shell)
+ * would otherwise land on freebuff's project picker on every restart. When that
+ * is about to happen the most recently used real project is used instead, so a
+ * restart continues in the folder the previous session worked in.
+ */
+function resolveProjectFolder (cwd, state, home = os.homedir()) {
+  if (!isProjectPickerFolder(cwd, home)) return cwd
+  const known = recentProjectFolders(state, home)
+  return known[0] || cwd
 }
 
 function credentialsPath (account) {
@@ -573,6 +648,9 @@ function removeAccount (state, accountId, options = {}) {
 module.exports = {
   SUPPORT_FILES,
   accountConfigDir,
+  isProjectPickerFolder,
+  recentProjectFolders,
+  resolveProjectFolder,
   credentialsPath,
   isSignedIn,
   credentialExpiry,

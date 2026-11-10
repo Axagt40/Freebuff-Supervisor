@@ -41,7 +41,10 @@ const KINDS = {
   'session-limit': { ends: true, wait: true, retype: false, delayMs: 0 },
   'session-ended': { ends: false, wait: false, retype: true, delayMs: 4000 },
   'turn-limit': { ends: false, wait: false, retype: true, delayMs: 5000 },
-  capacity: { ends: false, wait: false, retype: true, delayMs: 15000 }
+  capacity: { ends: false, wait: false, retype: true, delayMs: 15000 },
+  // A dropped request is not a dead session. freebuff's own copy says to send
+  // the message again, and retyping it starts a new turn on the same chat.
+  timeout: { ends: false, wait: false, retype: true, delayMs: 5000 }
 }
 
 /**
@@ -77,6 +80,15 @@ const RULES = [
     kind: 'session-ended',
     name: 'session-ended-code',
     match: /session_expired|session_superseded|session_model_mismatch|waiting_room_required/
+  },
+  // A network-level timeout or dropped connection. The exact sentences are
+  // freebuff's error box: "Connection timed out: no data was received…",
+  // "Retrying your message usually works" and "Couldn't reach the server".
+  // The API names are matched too when only the log has the failure.
+  {
+    kind: 'timeout',
+    name: 'network-timeout',
+    match: /connection timed out|no data was received from the server|retrying your message usually works|request was aborted|couldn'?t reach (?:the )?(?:freebuff )?servers?|can'?t reach (?:the )?(?:freebuff )?servers?|check your (?:connection|network)|network (?:error|is unreachable)|socket hang up|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i
   },
   // Temporary: the message can be sent again shortly.
   {
@@ -139,6 +151,7 @@ function describe (verdict) {
   if (verdict.kind === 'session-limit') return 'free sessions used up — waiting for the reset'
   if (verdict.kind === 'session-ended') return 'free session ended — continuing in a new session'
   if (verdict.kind === 'turn-limit') return 'turn usage limit — continuing in a new turn'
+  if (verdict.kind === 'timeout') return 'network timeout — sending the message again'
   return 'freebuff is busy — retrying shortly'
 }
 

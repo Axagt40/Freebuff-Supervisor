@@ -283,3 +283,34 @@ test('an account with a live session is not removed', () => {
   assert.match(result.reason, /live session/)
   assert.equal(state.accounts.length, 2)
 })
+
+test('a launch in the home folder recovers the last project instead of the picker', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freebuffs-folder-'))
+  dirs.push(root)
+  const home = path.join(root, 'home')
+  const project = path.join(root, 'project')
+  fs.mkdirSync(home, { recursive: true })
+  fs.mkdirSync(project, { recursive: true })
+
+  const state = emptyState()
+  const account = accounts.ensureDefaultAccount(state)
+  fs.mkdirSync(account.configDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(account.configDir, 'recent-projects.json'),
+    JSON.stringify([{ path: project, lastOpened: 1234 }])
+  )
+
+  assert.equal(accounts.isProjectPickerFolder(home, home), true)
+  assert.equal(accounts.isProjectPickerFolder(path.dirname(home), home), true)
+  assert.equal(accounts.isProjectPickerFolder(project, home), false)
+  assert.equal(
+    accounts.resolveProjectFolder(home, state, home),
+    project,
+    'the folder a previous session used must replace the picker'
+  )
+  assert.equal(
+    accounts.resolveProjectFolder(project, state, home),
+    project,
+    'a real project folder is left alone'
+  )
+})

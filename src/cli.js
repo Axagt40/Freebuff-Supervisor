@@ -72,8 +72,9 @@ A supervisor reports to Discord when it starts, when a session ends, when it
 stops, and when something needs a person (CRITICAL). A session that fails is
 retried with backoff, and the relaunched session is told to continue unfinished
 work, including after a switch to another account; Ctrl-C stops it. A plain
-launch continues this folder's last conversation, and an idle session is
-repeatedly pushed with the last task instead of being left waiting.
+launch continues this folder's last conversation from where it stopped. An idle
+session is pushed every few minutes to keep working instead of being left
+waiting, and a working one is never interrupted.
 
 Data lives in ~/.freebuffs (accounts/, logs/, run/, state.json).
 Accounts are isolated by FREEBUFF_CONFIG_DIR; nothing is listed at launch.

@@ -84,8 +84,12 @@ const DEFAULT_MAX_FATAL_RETRIES = 2
  * conversation recovers it.
  */
 const DEFAULT_MAX_FRESH_RESTARTS = 1
-/** How long a pty session may be quiet before the nudge text is typed at it. */
-const DEFAULT_NUDGE_MS = 5 * 60 * 1000
+/**
+ * How long a pty session may be quiet before the "keep working" nudge is
+ * typed at it. Only an idle session is nudged (no running turn, empty input
+ * box), so a session that is already working is never interrupted.
+ */
+const DEFAULT_NUDGE_MS = 7 * 60 * 1000
 /**
  * How long to keep an account out of rotation after its free sessions run out
  * when the reset time cannot be read, and the longest wait the loop will sit
@@ -387,7 +391,7 @@ function withoutContinue (args) {
  * @param {(reason: string, detail: string, extra: object) => void} [options.onCritical]
  */
 async function supervise (options) {
-  const {
+  let {
     run,
     args = [],
     cwd = process.cwd(),
@@ -483,9 +487,33 @@ async function supervise (options) {
   }
 
   for (;;) {
+    // An automatic restart from home (a reboot service, an autostart entry)
+    // would relaunch freebuff on its project picker, which an unattended
+    // session can never leave. From the second attempt on, adopt the folder
+    // that was picked or used last so every restart continues in the same
+    // project. The first attempt of a new session is left alone: the picker is
+    // where the person chooses the folder themselves.
+    const continuing = hasContinue(currentArgs)
+    if ((attempt > 0 || continuing) && accounts.isProjectPickerFolder(cwd)) {
+      const recovered = accounts.resolveProjectFolder(cwd, loadState())
+      if (recovered !== cwd) {
+        logLine('info', 'session folder recovered', {
+          from: shortHome(cwd),
+          to: shortHome(recovered)
+        })
+        logEvent('supervisor.cwd_recovered', {
+          from: cwd,
+          to: recovered,
+          reason: 'a restart was about to start in the home folder'
+        })
+        cwd = recovered
+      }
+    }
+
     attempt += 1
     const result = await run({
       attempt,
+      cwd,
       args: currentArgs,
       restarting: attempt > 1,
       previousAccountId,

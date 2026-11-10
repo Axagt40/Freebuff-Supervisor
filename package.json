@@ -1,6 +1,6 @@
 {
   "name": "freebuffs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "freebuff supervisor: multi-account sessions that keep themselves running, with a side monitor",
   "license": "MIT",
   "bin": {
@@ -12,6 +12,7 @@
     "install.sh",
     "wait-and-poweroff.sh",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

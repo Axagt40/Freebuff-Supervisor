@@ -262,10 +262,11 @@ test('an account switch continues the task even with --no-pty', () => {
   }
 })
 
-test('a plain launch continues the folder conversation and types the last task', () => {
+test('a plain launch continues the folder conversation from where it stopped', () => {
   // This is the case the supervisor kept getting wrong: opening a session in a
   // folder it has worked in before must carry on with that work, not sit at a
-  // new empty chat waiting for somebody to type the task again.
+  // new empty chat waiting for somebody to type the task again. The chat is
+  // resumed, so the task is already in it and is not restated.
   const world = makeWorld()
   const record = path.join(world.root, 'tui-record.jsonl')
   const tui = writeTui(path.join(world.root, 'fake-tui.js'))
@@ -297,11 +298,11 @@ test('a plain launch continues the folder conversation and types the last task',
       .filter((item) => item.event === 'input')
       .map((item) => item.chunk)
       .join('')
-    assert.match(typed, /Continue the unfinished task/)
-    assert.match(
+    assert.match(typed, /Continue from where you left off/)
+    assert.doesNotMatch(
       typed,
       /fix the flux capacitor shutdown bug/,
-      'the resumed session must be told the task it is carrying on with'
+      'the resumed chat already holds the task, so it is not explained again'
     )
 
     const events = world.events()

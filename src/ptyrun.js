@@ -81,6 +81,12 @@ const MAX_RESENDS = 2
  * instead of pressing Enter at a screen that will never take the message.
  */
 const MAX_LIMIT_RETYPES = 2
+/**
+ * A network timeout has its own five-minute deadline, so the same error box may
+ * legitimately be answered again after this much time. Without the gap the
+ * watchdog would retype at the same still-drawn error every second.
+ */
+const TIMEOUT_RETRY_GAP_MS = 60 * 1000
 /** Do not report the same session state more than this often. */
 const LIMIT_REPORT_MS = 60 * 1000
 /**
@@ -144,6 +150,21 @@ const LIMIT_QUIET_MS = 20 * 1000
 const INTERRUPTED_MARK = /\[response interrupted\]/i
 /** Let the TUI settle after the interruption before typing at it. */
 const INTERRUPTED_SETTLE_MS = 3 * 1000
+/**
+ * How long a session may sit on an error at the bottom of its screen before the
+ * task is pushed at it. freebuff draws the failure, ends the turn and waits for
+ * a message that nothing else is going to send, so doing nothing there left the
+ * session looking alive while it did no work until the stall watch fired.
+ */
+const ERROR_SETTLE_MS = 15 * 1000
+/** The same error is pushed at once, not on every watchdog tick. */
+const ERROR_RETRY_GAP_MS = 10 * 60 * 1000
+/**
+ * A TUI-level error left at the start of a row. Ordinary prose about an error
+ * does not start a row with it, so it cannot pass for a session that is stuck
+ * on its error screen.
+ */
+const ERROR_ROW = /^(?:error|fatal|exception)\b\s*[:!-]|^[✖⨯×]\s/i
 
 /**
  * Bracketed paste, the way a terminal hands pasted text to an application. A
@@ -541,6 +562,7 @@ function runOnPty (options) {
   // been answered by typing the task in, so one notice is not answered twice.
   let limitSeenAt = 0
   let limitConsumedFor = null
+  let limitConsumedAt = 0
   // When the last turn was recorded as interrupted, and when that interruption
   // was answered by typing the task in again.
   let interruptedAt = 0
@@ -589,6 +611,12 @@ function runOnPty (options) {
   const limitQuietMs = options.limitQuietMs === undefined
     ? LIMIT_QUIET_MS
     : Math.max(0, options.limitQuietMs)
+  // Exposed like verifyMs: a test must not wait out the real settle window.
+  const errorSettleMs = options.errorSettleMs === undefined
+    ? ERROR_SETTLE_MS
+    : Math.max(0, options.errorSettleMs)
+  // The error row already pushed at, so one failure is answered once.
+  let handledError = { text: '', at: 0 }
 
   /**
    * Click the input box so the TUI gives it focus.
@@ -770,7 +798,7 @@ function runOnPty (options) {
   const nudge = options.nudge && options.nudge.text
     ? {
         text: options.nudge.text,
-        idleMs: Math.max(1000, options.nudge.idleMs || 5 * 60 * 1000),
+        idleMs: Math.max(1000, options.nudge.idleMs || 7 * 60 * 1000),
         // Unlimited by default: an idle task is pushed again and again, at a
         // growing interval, instead of being dropped after a few tries.
         max: options.nudge.max === undefined
@@ -989,8 +1017,20 @@ function runOnPty (options) {
     // only reliable place to read them — and a row of choices is what a person
     // selects with the arrow keys, not with a `y`.
     const parsed = dialog.parse(rows, { boxIdle })
-    if (parsed.kind === 'none') {
+    // A dialog that is really waiting for a person replaces the input box: the
+    // TUI stops drawing the empty box while it is open, and no turn is running.
+    // A question the agent asked in its own words leaves that box drawn under
+    // it — that is a finished turn, not something blocking the session. Treating
+    // those as dialogs held the nudges still and pinged the phone after the work
+    // was already done.
+    const blockingDialog = parsed.kind !== 'none' && !boxIdle && !busy
+    if (!blockingDialog) {
       dialogNow = null
+      // Nothing is blocking the session while its empty box is drawn, so a
+      // pending dialog was a question in the agent's own prose (or one the
+      // answer rules read before the frame was complete). Leaving it set held
+      // every nudge still, which is how a finished turn looked frozen.
+      if (boxIdle) pendingDialog = null
     } else {
       dialogNow = parsed
       lastDialogAt = now
@@ -1146,13 +1186,15 @@ function runOnPty (options) {
         limit.retype &&
         retypeText &&
         limitRetypes < MAX_LIMIT_RETYPES &&
-        limitConsumedFor !== limit.message &&
+        (limitConsumedFor !== limit.message ||
+          (limit.kind === 'timeout' && now - limitConsumedAt >= TIMEOUT_RETRY_GAP_MS)) &&
         !pendingSubmit &&
         !pendingDialog &&
         !busy &&
         now - limitSeenAt >= Math.max(0, limit.delayMs || 0)
       ) {
         limitConsumedFor = limit.message
+        limitConsumedAt = now
         limitRetypes += 1
         limitSeenAt = now
         logLine('info', 'freebuff asked for the message again — typing it', {
@@ -1171,6 +1213,32 @@ function runOnPty (options) {
       limitRetypes = 0
       limitConsumedFor = null
       acceptedLimit = null
+    }
+
+    // A session sitting on an error it cannot get past is not working: the TUI
+    // drew the failure, the turn is over, and it waits for a message that
+    // nothing else will send. Push the task once the screen has settled, so an
+    // error does not leave the session doing nothing for twenty minutes.
+    const errorRow = rows.slice(-3).find((row) => ERROR_ROW.test(row))
+    const errorText = resume && !resumed
+      ? null
+      : (resume ? resume.text : (nudge ? nudge.text : null))
+    if (
+      errorRow &&
+      errorText &&
+      boxSeen &&
+      boxIdle &&
+      !pendingSubmit &&
+      !pendingDialog &&
+      !busy &&
+      !(limitVerdict && limitVerdict.kind !== 'none') &&
+      now - Math.max(lastProgressAt, startedAt) >= errorSettleMs &&
+      (handledError.text !== errorRow || now - handledError.at >= ERROR_RETRY_GAP_MS)
+    ) {
+      handledError = { text: errorRow, at: now }
+      logLine('warn', 'session is sitting on an error — pushing it to continue', {})
+      logEvent('session.error_retry', { error: errorRow.slice(0, 200) })
+      typeThenEnter(errorText)
     }
 
     // Work spoken on the phone: a task queued by the voice line is typed into
@@ -1297,6 +1365,8 @@ function runOnPty (options) {
         // exactly as the message says, instead of pressing Enter at it.
         const text = pendingSubmit.text
         pendingSubmit = null
+        limitConsumedFor = limit.message
+        limitConsumedAt = now
         limitRetypes += 1
         logLine('info', 'session asked for the message again — typing it again', {
           state: limit.kind,
@@ -1497,6 +1567,12 @@ function runOnPty (options) {
     }
 
     if (now - remoteAnswerAt < REMOTE_ANSWER_GRACE_MS) return
+    // A prompt that really blocks the session has taken the empty input box
+    // away and no turn is running. Prose that merely quotes a yes/no prompt
+    // (documentation, a quoted command output) does neither, so a finished
+    // turn can no longer ring the phone over it.
+    const rowsNow = screenRows(buffer)
+    if (boxIdleRows(rowsNow) || turnRunning(buffer, lastStatusAt)) return
 
     seen.set(key, now)
     // The screen parser may already have reported this same question, and one

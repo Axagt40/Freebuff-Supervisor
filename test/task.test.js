@@ -50,6 +50,16 @@ test('a bare "continue" nudge is never mistaken for the task', () => {
   }
 })
 
+test('the periodic keep-working nudge is never recovered as the task', () => {
+  // The pty types this at an idle session, so it lands in the account history.
+  // Reading it back as the task would replace the real work with it.
+  const dir = historyDir([
+    'build the firmware',
+    'Continue working on the task. Ignore this prompt if you are already working.'
+  ])
+  assert.equal(task.lastTask(dir), 'build the firmware')
+})
+
 test('the supervisor does not feed its own continue prompt back in', () => {
   // A restart types this into the new session, so it lands in that account's
   // history. Picking it up again would nest the prompt a little deeper on
@@ -173,4 +183,33 @@ setTimeout(() => process.exit(1), 3000)
   } finally {
     world.cleanup()
   }
+})
+
+test('the resumed chat provides the newest typed message, not stale history', () => {
+  // The account-wide history lags the conversation by a few turns after a
+  // restart; the chat being resumed has the message the person actually typed.
+  const dir = historyDir(['old task one', 'old task two'])
+  const chatDir = path.join(dir, 'chats', '2026-10-29T15-44-14.132Z')
+  fs.mkdirSync(chatDir, { recursive: true })
+  const own = task.continuePrompt('fallback', 'the latest thing I typed')
+  fs.writeFileSync(
+    path.join(chatDir, 'chat-messages.json'),
+    JSON.stringify([
+      { variant: 'user', content: 'old task two' },
+      { variant: 'assistant', content: 'still working' },
+      { variant: 'user', content: [{ type: 'text', text: 'the latest thing I typed' }] },
+      { variant: 'user', content: own }
+    ])
+  )
+
+  assert.equal(
+    task.lastTask(dir, { chatDir }),
+    'the latest thing I typed',
+    'the chat transcript must win over the older account history'
+  )
+  assert.equal(
+    task.lastChatTask(chatDir, { ignore: new Set() }),
+    'the latest thing I typed',
+    'block content is read like string content'
+  )
 })

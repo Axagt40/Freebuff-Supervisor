@@ -29,7 +29,8 @@ function scenario (tuiSource, {
   phoneAnswer = null,
   verifyMs = null,
   maxRetries = null,
-  limitQuietMs = null
+  limitQuietMs = null,
+  errorSettleMs = null
 } = {}) {
   // progress: 'clock' means work is always happening; a number is a frozen
   // stamp, which is how a session that makes no progress looks.
@@ -62,6 +63,7 @@ runOnPty({
   verifyMs: ${verifyMs == null ? 'undefined' : Number(verifyMs)},
   maxRetries: ${maxRetries == null ? 'undefined' : Number(maxRetries)},
   limitQuietMs: ${limitQuietMs == null ? 'undefined' : Number(limitQuietMs)},
+  errorSettleMs: ${errorSettleMs == null ? 'undefined' : Number(errorSettleMs)},
   onStuck: ${stuck
     ? "(text) => { process.stderr.write('STUCK ' + JSON.stringify(text) + '\\n') }"
     : 'undefined'},
@@ -235,6 +237,53 @@ setTimeout(() => process.exit(22), 12000)
   assert.match(run.stdout, /NUDGED:/, 'ordinary output must not block the nudge')
   assert.equal(run.result.escalated, 0, 'prose is not a dialog')
   assert.equal(run.result.nudges, 1)
+})
+
+test('a finished turn that quotes a yes/no prompt is not escalated', () => {
+  // An agent writes about prompts, commands and error messages all the time.
+  // A question it quoted in its own output is not a dialog: the empty input box
+  // is still drawn, which is exactly what a blocking dialog takes away.
+  const run = scenario(`'use strict'
+// One repaint, the way a TUI draws a frame: the transcript and its box at once.
+process.stdout.write('The CLI asks "Allow the agent to write files? (y/n)" when it starts.\\nEnter a coding task or / for commands\\n')
+process.stdin.setRawMode(true)
+process.stdin.setEncoding('utf8')
+process.stdin.once('data', (chunk) => {
+  process.stdout.write('NUDGED:' + JSON.stringify(chunk) + '\\n')
+  process.exit(21)
+})
+setTimeout(() => process.exit(22), 9000)
+`, { nudge: { text: 'keep going', idleMs: 1000, max: 1 } })
+
+  assert.equal(run.status, 0, run.stderr)
+  assert.match(run.stdout, /NUDGED:/, 'the idle session is still nudged')
+  assert.match(run.stdout, /keep going/)
+  assert.equal(run.result.escalated, 0, 'a quoted question is not one for a person')
+  assert.equal(run.result.code, 21)
+})
+
+test('a session sitting on an error is pushed to continue', () => {
+  // freebuff draws the failure and waits for a message. Nothing else sends one,
+  // so doing nothing left the session looking alive while it did no work.
+  const run = scenario(`'use strict'
+process.stdin.setRawMode(true)
+process.stdout.write('Error: the previous turn failed while running the tests.\\n')
+process.stdout.write('Enter a coding task or / for commands\\n')
+process.stdin.setEncoding('utf8')
+process.stdin.once('data', (chunk) => {
+  process.stdout.write('PUSHED:' + JSON.stringify(chunk) + '\\n')
+  process.exit(21)
+})
+setTimeout(() => process.exit(22), 8000)
+`, {
+    nudge: { text: 'keep going', idleMs: 600000, max: 1 },
+    errorSettleMs: 500
+  })
+
+  assert.equal(run.status, 0, run.stderr)
+  assert.match(run.stdout, /PUSHED:/, 'the error screen must not be left alone')
+  assert.match(run.stdout, /keep going/)
+  assert.equal(run.result.code, 21)
 })
 
 test('an idle session is nudged again and again, not just three times', () => {

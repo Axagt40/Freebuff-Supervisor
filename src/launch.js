@@ -39,6 +39,22 @@ const { nowIso, formatDuration, shortHome } = require('./util')
  */
 const LIMIT_FRESH_MS = 90 * 1000
 
+/**
+ * The short prompt typed at a session whose conversation is already resumed:
+ * the task and everything done so far are in that chat, so repeating them back
+ * at it was re-explaining the whole session on every restart.
+ */
+const RESUME_PROMPT =
+  'Continue from where you left off. Do not repeat work that is already done.'
+
+/**
+ * The short push typed at a session that went quiet. The pty only sends it when
+ * no turn is running and the input box is empty, so a working session is never
+ * interrupted by it.
+ */
+const NUDGE_TEXT =
+  'Continue working on the task. Ignore this prompt if you are already working.'
+
 function newSessionId () {
   return `${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`
 }
@@ -143,6 +159,9 @@ function nudgeConfig (env = process.env) {
   const resumeMs = Number(env.FREEBUFFS_RESUME_MS)
   return {
     text,
+    // The periodic "keep working" push is short: the conversation already has
+    // the task, so it only has to say to carry on.
+    nudgeText: custom || NUDGE_TEXT,
     // An explicit prompt is used exactly as given, without the recovered task
     // appended, because the person running it chose those words.
     custom: Boolean(custom),
@@ -165,6 +184,24 @@ function hasContinue (argv) {
   return argv.some((arg) => arg === '--continue' || arg.startsWith('--continue='))
 }
 
+/** The arguments without a `--cwd` of their own, so one can be put in front. */
+function withoutFolder (args) {
+  const kept = []
+  const list = Array.isArray(args) ? args : []
+  for (let index = 0; index < list.length; index += 1) {
+    const arg = list[index]
+    if (arg === '--cwd') {
+      if (list[index + 1] !== undefined && !String(list[index + 1]).startsWith('-')) {
+        index += 1
+      }
+      continue
+    }
+    if (arg.startsWith('--cwd=')) continue
+    kept.push(arg)
+  }
+  return kept
+}
+
 /**
  * Name the folder the session runs in, on every launch.
  *
@@ -173,12 +210,18 @@ function hasContinue (argv) {
  * folders — instead of a chat. Relying on the inherited working directory made
  * an automatic restart depend on that: the folder is now part of the arguments,
  * so a relaunch continues in exactly the folder the previous session worked in.
- * An explicit `--cwd` of the caller's own is left exactly as given.
+ *
+ * An explicit `--cwd` that points at the same folder is left exactly as given.
+ * A different one is replaced: when the supervisor recovers the folder a
+ * previous session used, the stale `--cwd` from the launch would otherwise put
+ * freebuff back on the picker.
  */
 function withFolder (args, cwd) {
   const list = Array.isArray(args) ? args : []
-  if (!cwd || cwdFromArgs(list)) return list
-  return ['--cwd', cwd, ...list]
+  if (!cwd) return list
+  const explicit = cwdFromArgs(list)
+  if (explicit && path.resolve(explicit) === path.resolve(cwd)) return list
+  return ['--cwd', cwd, ...withoutFolder(list)]
 }
 
 /**
@@ -339,14 +382,24 @@ function startStallWatch ({ configDir, cwd, stallMs, onStall }) {
  * conversation, so the typed prompt has to carry the work itself. Without a
  * readable history the configured fallback prompt is used unchanged.
  */
-function resumeText (context, account, state, nudges) {
+function resumeText (context, account, state, nudges, chatDir = null, options = {}) {
+  // The person set their own prompt, so it is used exactly as given.
   if (nudges.custom) return nudges.text
+  // The conversation is resumed as it is: the task, the work done so far and
+  // the point it stopped at are all in that chat already.
+  if (options.preserved) return RESUME_PROMPT
 
   const previous = context.previousAccountId && context.previousAccountId !== account.id
     ? state.accounts.find((item) => item.id === context.previousAccountId)
     : null
   const source = previous ? accounts.accountConfigDir(previous) : accounts.accountConfigDir(account)
-  const recovered = task.lastTask(source, { ignore: [nudges.text] })
+  // The resumed conversation's own newest user message is what the person
+  // typed last; the account-wide history can lag behind it by several turns
+  // when the session was restarted mid-conversation.
+  const recovered = task.lastTask(source, {
+    ignore: [nudges.text, nudges.nudgeText],
+    chatDir
+  })
   return task.continuePrompt(nudges.text, recovered)
 }
 
@@ -454,9 +507,20 @@ async function runSession (context) {
   // task: its first act was typing the continue prompt into the old chat.
   const freshStart = Boolean(fresh && !context.restarting)
   let resumedChat = null
+  // The conversation this attempt really opens on, when there is one. With it
+  // the session continues from the exact point it stopped at; without one the
+  // task has to be carried in the typed prompt instead.
+  let resumableChat = null
   if (!switched && !explicitContinue && !freshStart) {
     resumedChat = handoff.latestChat(accounts.accountConfigDir(account), cwd)
-    if (resumedChat) sessionArgs = handoff.continueWithChat(sessionArgs, resumedChat.id)
+    if (resumedChat) {
+      sessionArgs = handoff.continueWithChat(sessionArgs, resumedChat.id)
+      resumableChat = resumedChat
+    }
+  } else if (!switched && explicitContinue) {
+    // `--continue` resumes the folder's own conversation, so the same chat (and
+    // the same point in the work) is already there.
+    resumableChat = handoff.latestChat(accounts.accountConfigDir(account), cwd)
   }
 
   // A restart only resumes a conversation this account really has for this
@@ -466,7 +530,9 @@ async function runSession (context) {
   // fresh chat there instead, and the typed prompt below carries the task in.
   if (context.restarting && !carried && hasContinue(sessionArgs)) {
     const conversation = handoff.latestChat(accounts.accountConfigDir(account), cwd)
-    if (!conversation) {
+    if (conversation) {
+      resumableChat = conversation
+    } else {
       sessionArgs = withoutContinueArgs(sessionArgs)
       logLine('info', 'nothing to resume in this folder — starting a new chat', {
         session: sessionId,
@@ -533,7 +599,16 @@ async function runSession (context) {
   const nudges = nudgeConfig()
   // The real task when it can be recovered from freebuff's own history, so a
   // pushed session is told what to carry on with instead of just "continue".
-  const continueText = resumeText(context, account, state, nudges)
+  const continueText = resumeText(
+    context,
+    account,
+    state,
+    nudges,
+    carried ? carried.from : (resumedChat ? resumedChat.dir : null),
+    // A resumed conversation already holds the task and its progress; only a
+    // session without one is told what the work was.
+    { preserved: Boolean(resumableChat) && !carried && !switched }
+  )
   // A session that continues an earlier one (a restart, an explicit
   // --continue, or a conversation resumed on launch) opens waiting for a
   // message, so the prompt is typed as soon as the TUI has settled.
@@ -735,7 +810,7 @@ async function runSession (context) {
         // The live state and the phone are keyed by this, so the screen of a
         // running session can be read from anywhere on the machine.
         sessionId,
-        nudge: { text: continueText, idleMs: nudges.idleMs, max: nudges.max },
+        nudge: { text: nudges.nudgeText, idleMs: nudges.idleMs, max: nudges.max },
         // Work asked for on the phone: typed into this session as soon as it
         // is idle, so "korjaa se bugi" becomes an actual turn.
         takeTask: () => require('./voice').takeTask(sessionId),
@@ -1079,7 +1154,7 @@ async function launch (argv) {
   ensureDirs()
 
   const flags = parseLaunchFlags(argv)
-  const cwd = cwdFromArgs(flags.passthrough) || process.cwd()
+  let cwd = cwdFromArgs(flags.passthrough) || process.cwd()
 
   mutateState((state) => accounts.ensureDefaultAccount(state))
 
@@ -1096,6 +1171,26 @@ async function launch (argv) {
     if (!state.accounts.some(accounts.isSignedIn)) {
       throw new Error('still no signed-in account after setup')
     }
+  }
+
+  // A launch that continues a project (a reboot service, or `--continue` run
+  // from the home folder) must not land on freebuff's project picker, which no
+  // unattended session can leave, so the last real project is used instead.
+  // A new session is left where it was started: the picker is where the person
+  // chooses the folder themselves, and it must not be decided for them.
+  const continuing = hasContinue(flags.passthrough)
+  const recoveredCwd = continuing ? accounts.resolveProjectFolder(cwd, state) : cwd
+  if (recoveredCwd !== cwd) {
+    logLine('info', 'session folder recovered', {
+      from: shortHome(cwd),
+      to: shortHome(recoveredCwd)
+    })
+    logEvent('supervisor.cwd_recovered', {
+      from: cwd,
+      to: recoveredCwd,
+      reason: 'continuing a project from the home folder, which opens the project picker'
+    })
+    cwd = recoveredCwd
   }
 
   const binary = resolveBinary()
@@ -1206,7 +1301,10 @@ async function launch (argv) {
       ...info,
       binary,
       requested: flags.requested,
-      cwd,
+      // The supervisor may recover a different folder between attempts (a
+      // restart that would otherwise open the project picker), so its value
+      // wins over the one this launch started with.
+      cwd: info.cwd || cwd,
       monitor: flags.monitor,
       flags: sessionFlags
     })

@@ -1,4 +1,4 @@
-# FREEBUFF SUPERVISOR — v1.0.0
+# FREEBUFF SUPERVISOR — v1.0.1
 
 An unattended supervisor for [freebuff](https://freebuff.com) coding sessions.
 
@@ -13,9 +13,9 @@ dashboard: every account, its credits, and every session, one keypress from
 starting work.
 
 ```
-  FREEBUFFS  supervisor dashboard  v1.0.0                            23:12:04
+  FREEBUFFS  supervisor dashboard  v1.0.1                            23:12:04
 ────────────────────────────────────────────────────────────────────────────
-  FREEBUFF SUPERVISOR v1.0.0 — freebuff sessions, kept running unattended
+  FREEBUFF SUPERVISOR v1.0.1 — freebuff sessions, kept running unattended
   ACCOUNTS  2/2 signed in
    ＋ add account  sign in another freebuff account
    ● account-1    signed in   1 live   6 sess    12m ago        480
@@ -49,7 +49,7 @@ It checks Node, installs the optional dependency and puts `sfreebuff` on your
 **From the tarball directly:**
 
 ```bash
-npm install -g ./freebuff-supervisor-1.0.0.tgz
+npm install -g ./freebuff-supervisor-1.0.1.tgz
 sfreebuff --version
 ```
 
@@ -78,9 +78,11 @@ duplicated.
 
 - **Keeps a session alive 24/7.** A crash, a stall, a dropped connection or a
   finished free session is treated as an interruption: the supervisor relaunches
-  freebuff with `--continue`, backs off between attempts, and types the last real
-  task into a resumed conversation so the work continues. A clean exit in the
-  middle of a turn is recognised as a cut-off task, not a finished one.
+  freebuff with `--continue`, backs off between attempts, and keeps the work
+  going in the resumed conversation: a short “continue from where you left off”
+  when that chat is resumed, or the recovered task itself when there is no chat
+  to resume. A clean exit in the middle of a turn is recognised as a cut-off
+  task, not a finished one.
 - **Runs several sessions at once**, one per account and folder, each an
   ordinary supervisor that logs, reports and can be stopped on its own.
 - **Moves a session to another account** when one runs out of free sessions.
@@ -212,19 +214,35 @@ Frequently used settings: `FREEBUFFS_RESTART_MS`, `FREEBUFFS_STALL_MS`,
 `FREEBUFFS_MAX_CLEAN_RESUMES`, `FREEBUFFS_LIMIT_WAIT_MS`, `FREEBUFFS_SUDO=0`,
 `FREEBUFFS_PTY=0`, `FREEBUFFS_MONITOR_WINDOW=0`, `FREEBUFFS_CREDITS=0`.
 
-## What's new in 1.0.0
+## What's new in 1.0.1
 
-- A session counts as **live** only while its recorded pid is still the freebuff
-  process (or its supervisor), not merely a number that is alive — so the
-  dashboard no longer shows phantom live sessions.
-- `x` on such a leftover row **clears the record** instead of refusing forever,
-  and `status` reports live sessions the same way.
-- A **new** session starts its own conversation; `enter` on an existing session
-  row reads `enter continue` and resumes that conversation with the continue
-  prompt.
-- Account rotation picks the longest-idle usable account and skips accounts that
-  reported an error, are cooling down, or have an expired token.
-- Version number and watermark in the dashboard header.
+A reliability release: sessions keep their place, keep their task, and keep
+working through the failures that used to leave them idle.
+
+- **Restarts no longer land on the project picker.** A relaunch, or a
+  `--continue` started from the home folder, recovers the most recently used
+  real project instead of opening freebuff's folder list, which an unattended
+  session could never leave. A **new** session still leaves the folder choice
+  to you.
+- **A resumed conversation is not re-explained.** When the chat really is
+  resumed, the session is told to continue from where it stopped instead of
+  being handed the whole task again on every restart.
+- **The task comes from the conversation being resumed**, not from the account
+  history that lags several turns behind it, so a restart picks up the actual
+  latest instruction.
+- **Network timeouts are retried.** A dropped connection or timed-out request
+  is recognised, and the message is sent again rather than the session being
+  left waiting or counted as dead.
+- **An error screen is pushed past.** A session sitting on an error now gets the
+  task again after the screen settles, instead of looking alive until the
+  stall watch fires twenty minutes later.
+- **Quoted prompts no longer freeze a session.** A finished turn that merely
+  mentions a yes/no question is not treated as a blocking dialog, so nudges
+  keep flowing and the phone does not ring over prose.
+- Stale `--cwd` values are replaced when a restart recovers a different folder,
+  and the idle nudge moved to seven minutes with short, non-disruptive text.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## License
 

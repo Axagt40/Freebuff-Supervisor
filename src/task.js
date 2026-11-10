@@ -26,7 +26,8 @@ const CONTINUE_PREFIX =
 
 /** Matches this module's text and the earlier wording of it, so neither is
  * ever picked up as the task on the next restart. */
-const OWN_PROMPT = /^Continue the unfinished task from the previous session\b/i
+const OWN_PROMPT =
+  /^(Continue the unfinished task from the previous session|Continue working on the task)\b/i
 
 /**
  * A bare "carry on"-style prompt says nothing about the work itself; it is not
@@ -54,24 +55,88 @@ function readHistory (configDir) {
   }
 }
 
+/** Extract the readable text of a chat block or content field. */
+function textFrom (value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value.map((item) => textFrom(item)).filter(Boolean).join(' ')
+  }
+  if (!value || typeof value !== 'object') return ''
+  if (typeof value.text === 'string') return value.text
+  if (typeof value.content === 'string') return value.content
+  if (Array.isArray(value.content)) return textFrom(value.content)
+  return ''
+}
+
+/** True when this chat record is something the person typed. */
+function isUserMessage (message) {
+  const role = String(
+    message.variant || message.role || message.type || message.author || message.sender || ''
+  )
+  return /^(user|human|person)$/i.test(role)
+}
+
+/**
+ * The newest user message in one conversation, oldest file entries last.
+ *
+ * The account-wide history can be written slightly behind the conversation, so
+ * after a restart it may still end with a prompt from several turns ago. The
+ * resumed chat's own transcript is the exact conversation being continued.
+ */
+function lastChatTask (chatDir, options) {
+  if (!chatDir) return null
+  let raw
+  try {
+    raw = JSON.parse(
+      fs.readFileSync(path.join(chatDir, 'chat-messages.json'), 'utf8')
+    )
+  } catch {
+    return null
+  }
+  const messages = Array.isArray(raw)
+    ? raw
+    : (raw && Array.isArray(raw.messages) ? raw.messages : [])
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!message || typeof message !== 'object' || !isUserMessage(message)) continue
+    const text = textFrom(message.content) || textFrom(message.blocks)
+    if (!text) continue
+    const usable = usableTask(text, options)
+    if (usable) return usable
+  }
+  return null
+}
+
+/** The one-line form of a prompt, or null when it is not a real task. */
+function usableTask (text, options) {
+  const flat = oneLine(text, options.max)
+  if (!flat) return null
+  if (OWN_PROMPT.test(flat)) return null
+  if (options.ignore.has(flat)) return null
+  if (CONTINUATION_PROMPT.test(flat)) return null
+  return flat
+}
+
 /**
  * The last real task typed in an account, or null when nothing usable is there.
  *
  * The supervisor's own continue prompts are skipped, as are bare "keep going"
  * nudges: otherwise every restart would feed its own text back in and the task
- * would grow on each attempt.
+ * would grow on each attempt. When the conversation being resumed is known, its
+ * own newest user message wins over the account-wide history, which can lag.
  */
 function lastTask (configDir, options = {}) {
   const ignore = new Set((options.ignore || []).map((text) => oneLine(text)))
-  const history = readHistory(configDir)
+  const settings = { ...options, ignore }
 
+  const fromChat = lastChatTask(options.chatDir, settings)
+  if (fromChat) return fromChat
+
+  const history = readHistory(configDir)
   for (let index = history.length - 1; index >= 0; index -= 1) {
-    const text = oneLine(history[index], options.max)
-    if (!text) continue
-    if (OWN_PROMPT.test(text)) continue
-    if (ignore.has(text)) continue
-    if (CONTINUATION_PROMPT.test(text)) continue
-    return text
+    const text = usableTask(history[index], settings)
+    if (text) return text
   }
   return null
 }
@@ -94,6 +159,7 @@ module.exports = {
   CONTINUE_PREFIX,
   oneLine,
   readHistory,
+  lastChatTask,
   lastTask,
   continuePrompt
 }

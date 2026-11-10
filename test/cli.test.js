@@ -51,10 +51,12 @@ test('the continue prompt and its startup delay are configurable', () => {
     FREEBUFFS_RESUME_MS: '1500'
   })
   assert.equal(config.text, 'carry on')
+  assert.equal(config.nudgeText, 'carry on')
   assert.equal(config.resumeMs, 1500)
 
   const fallback = nudgeConfig({})
   assert.match(fallback.text, /continue/i)
+  assert.match(fallback.nudgeText, /already working/i)
   assert.ok(fallback.resumeMs > 0)
 })
 
