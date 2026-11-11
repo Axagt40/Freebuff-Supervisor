@@ -9,6 +9,8 @@ const accounts = require('./accounts')
 const { activeMonitors } = require('./status')
 const { isPidAlive, readJson, shortHome, formatDuration } = require('./util')
 const sudo = require('./sudo')
+const voice = require('./voice')
+const tailnet = require('./tailnet')
 const { available: ptyAvailable } = require('./ptyrun')
 const { stopRequested } = require('./supervise')
 
@@ -172,6 +174,20 @@ function checkAutoAnswer () {
   )
 }
 
+function checkVoice () {
+  const current = voice.settings()
+  if (!current.enabled) return report('ok', 'voice', 'off — `sfreebuff voice on`')
+  const site = tailnet.status({ fresh: true })
+  const fixes = tailnet.problems(
+    { port: current.port, publicUrl: current.publicUrl, advice: false },
+    site
+  )
+  if (fixes.length > 0) return report('warn', 'voice', fixes[0])
+  const live = voice.running()
+  if (!live) return report('warn', 'voice', 'on but not running — `sfreebuff voice serve`')
+  return report('ok', 'voice', `listening · ${tailnet.describe(site)}`)
+}
+
 function checkSudo () {
   const state = sudo.status()
   if (!state.available) {
@@ -215,6 +231,7 @@ function doctor () {
     ...checkAccounts(),
     checkMonitors(),
     checkAutoAnswer(),
+    checkVoice(),
     checkSudo(),
     checkStopRequest(),
     checkLog()

@@ -982,6 +982,101 @@ test('the settings screen shows the voice toggle and is clickable', () => {
   })
 })
 
+test('the settings screen has a low CPU switch that is off by default', () => {
+  withHome((home) => {
+    seed(home, {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      accounts: [account('account-1')],
+      sessions: [],
+      lastAccountId: 'account-1',
+      lastAccountByCwd: {}
+    })
+    const model = dashboard.collect({})
+    assert.equal(model.optimize.enabled, false, 'optimization defaults to off')
+
+    const view = dashboard.buildView(model, {
+      width: 100,
+      height: 30,
+      color: false,
+      screen: 'settings',
+      selected: { settings: 1 }
+    })
+    const text = view.lines.join('\n')
+    assert.match(text, /Optimization/)
+    assert.match(text, /optimization off/)
+    assert.match(text, /off — sessions run at normal priority/)
+
+    // The row is the switch, and the footer button acts on the selected row.
+    const optimizeRow = view.layout.settings.find((item) => item.index === 1)
+    assert.ok(optimizeRow, 'the optimization row is clickable')
+    assert.deepEqual(
+      dashboard.hitTest(view.layout, 8, optimizeRow.y),
+      { action: 'toggle-optimize' }
+    )
+    const buttonRow = view.lines.findIndex((line) => line.includes('[ space turn on ]'))
+    assert.ok(buttonRow > 0)
+    const x = view.lines[buttonRow].indexOf('[ space turn on ]') + 3
+    assert.deepEqual(dashboard.hitTest(view.layout, x, buttonRow), { action: 'toggle-optimize' })
+
+    const on = dashboard.buildView(
+      { ...model, optimize: { enabled: true } },
+      { width: 100, height: 30, color: false, screen: 'settings', selected: { settings: 1 } }
+    )
+    assert.match(on.lines.join('\n'), /optimization ON/)
+    assert.match(on.lines.join('\n'), /sessions start at nice 10/)
+  })
+})
+
+test('the optimization switch is stored as off unless it is on', () => {
+  withHome((home) => {
+    const optimize = require('../src/optimize')
+    assert.equal(optimize.enabled(), false)
+    optimize.setEnabled(true)
+    assert.equal(optimize.enabled(), true)
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).optimize,
+      true
+    )
+    optimize.setEnabled(false)
+    assert.equal(optimize.enabled(), false)
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).optimize,
+      undefined
+    )
+  })
+})
+
+test('the settings screen keeps both switches and its buttons on a short terminal', () => {
+  withHome((home) => {
+    seed(home, {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      accounts: [account('account-1')],
+      sessions: [],
+      lastAccountId: 'account-1',
+      lastAccountByCwd: {}
+    })
+    const model = dashboard.collect({})
+    const view = dashboard.buildView(model, {
+      width: 60,
+      height: 12,
+      color: false,
+      screen: 'settings',
+      selected: { settings: 0 }
+    })
+    const text = view.lines.join('\n')
+    // Both switches stay visible, and the only way back is not dropped.
+    assert.match(text, /Voice calls/)
+    assert.match(text, /Optimization/)
+    assert.match(text, /\[ esc back \]/)
+    assert.match(text, /\[ q quit \]/)
+    assert.ok(view.lines.length <= 12)
+    assert.equal(view.layout.buttons.length, 3)
+    for (const line of view.lines) assert.ok(line.length <= 60, 'no row is wider than the terminal')
+  })
+})
+
 test('an account waiting out its free sessions is marked as limited', () => {
   withHome((home) => {
     seed(home, {
@@ -1001,5 +1096,127 @@ test('an account waiting out its free sessions is marked as limited', () => {
     assert.equal(model.accounts[0].cooling, true)
     const text = plain(dashboard.render(model, { width: 100, height: 30, color: false })).join('\n')
     assert.match(text, /limit/)
+  })
+})
+
+test('a session whose record lost its folder still shows the path it ran in', () => {
+  withHome((home) => {
+    seed(home, {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      accounts: [account('account-1')],
+      sessions: [
+        {
+          id: 'from-args',
+          accountId: 'account-1',
+          pid: null,
+          launcherPid: null,
+          args: ['--cwd', '/work/from-args'],
+          startedAt: new Date().toISOString()
+        },
+        {
+          id: 'from-account',
+          accountId: 'account-1',
+          pid: null,
+          launcherPid: null,
+          args: [],
+          startedAt: new Date(Date.now() - 1000).toISOString()
+        }
+      ],
+      lastAccountId: 'account-1',
+      lastAccountByCwd: { '/work/from-account': 'account-1' }
+    })
+    const model = dashboard.collect({})
+    assert.equal(model.sessions.length, 2)
+    const text = plain(dashboard.render(model, { width: 100, height: 30, color: false })).join('\n')
+    // The folder is in the session's own arguments, or failing that the folder
+    // the account was last used in. A blank cell was the bug.
+    assert.match(text, /\/work\/from-args/)
+    assert.match(text, /\/work\/from-account/)
+  })
+})
+
+test('the settings screen has force continue and shutdown timer switches', () => {
+  withHome((home) => {
+    seed(home, {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      accounts: [account('account-1')],
+      sessions: [],
+      lastAccountId: 'account-1',
+      lastAccountByCwd: {}
+    })
+    const model = dashboard.collect({})
+    assert.equal(model.forceContinue.enabled, false, 'force continue defaults to off')
+    assert.equal(model.shutdownTimer.enabled, false, 'the shutdown timer defaults to off')
+
+    const view = dashboard.buildView(model, {
+      width: 100,
+      height: 30,
+      color: false,
+      screen: 'settings',
+      selected: { settings: 2 }
+    })
+    const text = view.lines.join('\n')
+    assert.match(text, /Force continue/)
+    assert.match(text, /force continue off/)
+    assert.match(text, /Shutdown timer/)
+    assert.match(text, /shutdown timer off/)
+
+    const forceRow = view.layout.settings.find((item) => item.index === 2)
+    const shutdownRow = view.layout.settings.find((item) => item.index === 3)
+    assert.ok(forceRow, 'the force continue row is clickable')
+    assert.ok(shutdownRow, 'the shutdown timer row is clickable')
+    assert.deepEqual(dashboard.hitTest(view.layout, 8, forceRow.y), { action: 'toggle-force' })
+    assert.deepEqual(dashboard.hitTest(view.layout, 8, shutdownRow.y), { action: 'toggle-shutdown' })
+
+    // The selected force continue row also offers the prompt editor.
+    const edit = view.layout.buttons.find((item) => item.action === 'edit-prompt')
+    assert.ok(edit, 'the prompt editor is a clickable button')
+    assert.ok(dashboard.keyActions('e').includes('edit-prompt'))
+  })
+})
+
+test('a custom force continue prompt is shown, stored, and reset', () => {
+  withHome((home) => {
+    seed(home, {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      accounts: [account('account-1')],
+      sessions: [],
+      lastAccountId: 'account-1',
+      lastAccountByCwd: {}
+    })
+    const overnight = require('../src/overnight')
+    overnight.setForceContinue(true)
+    overnight.setForceContinuePrompt('Carry on with the remaining phases.')
+
+    const model = dashboard.collect({})
+    assert.equal(model.forceContinue.enabled, true)
+    assert.equal(model.forceContinue.custom, 'Carry on with the remaining phases.')
+    assert.match(model.forceContinue.prompt, /FREEBUFFS ALL TASKS COMPLETE/)
+
+    const view = dashboard.buildView(model, {
+      width: 100,
+      height: 30,
+      color: false,
+      screen: 'settings',
+      selected: { settings: 2 }
+    })
+    assert.match(view.lines.join('\n'), /custom — "Carry on with the remaining phases\."/)
+
+    const editing = dashboard.buildView(model, {
+      width: 100,
+      height: 30,
+      color: false,
+      screen: 'settings',
+      selected: { settings: 2 },
+      promptEdit: 'Carry on'
+    })
+    assert.match(editing.lines.join('\n'), /prompt Carry on▌/)
+    assert.match(editing.lines.join('\n'), /enter saves · esc cancels/)
+
+    overnight.setForceContinuePrompt('')
+    assert.equal(dashboard.collect({}).forceContinue.custom, '')
   })
 })

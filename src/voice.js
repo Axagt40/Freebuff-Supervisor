@@ -35,6 +35,7 @@ const { readConfig, writeConfig } = require('./config')
 const { paths, ensureDirs } = require('./paths')
 const { logLine, logEvent } = require('./log')
 const { shortHome, formatDuration, isPidAlive, killIfMatches, safeUnlink } = require('./util')
+const tailnet = require('./tailnet')
 
 const DEFAULT_PORT = 8787
 const DEFAULT_LLM_URL = 'http://127.0.0.1:11434/v1'
@@ -374,14 +375,18 @@ function running () {
 /** The URL to open on the phone, including the access token. */
 function callUrl (env = process.env) {
   const current = settings(env)
-  const base = current.publicUrl ||
-    `http://127.0.0.1:${current.port}`
-  return `${base}/call/${token()}`
+  if (current.publicUrl) return `${current.publicUrl}/call/${token()}`
+  // 127.0.0.1 is not an address a phone can open. The tailnet address is the
+  // one the page is reachable on when no HTTPS URL has been set up.
+  const site = tailnet.status()
+  const host = site && site.ip ? site.ip : '127.0.0.1'
+  return `http://${host}:${current.port}/call/${token()}`
 }
 
 function summary (env = process.env) {
   const current = settings(env)
   const live = running()
+  const site = tailnet.status()
   return {
     enabled: current.enabled,
     running: Boolean(live),
@@ -391,7 +396,15 @@ function summary (env = process.env) {
     ntfy: Boolean(current.ntfy),
     model: current.llmModel,
     llmUrl: current.llmUrl,
-    pending: readPending().length
+    pending: readPending().length,
+    tailnet: {
+      ip: site.ip,
+      dnsName: site.dnsName,
+      online: site.online,
+      backendState: site.backendState,
+      keyExpired: site.keyExpired,
+      description: tailnet.describe(site)
+    }
   }
 }
 
@@ -2299,7 +2312,10 @@ async function serve (options = {}) {
       return
     }
 
-    if (req.method === 'GET' && url.pathname === `/call/${secret}`) {
+    // A link that arrives with a trailing slash (iOS, a chat app, a typed
+    // address) is the same link: answer it instead of failing as unauthorized.
+    const callPath = `/call/${secret}`
+    if (req.method === 'GET' && url.pathname.replace(/\/+$/, '').toLowerCase() === callPath.toLowerCase()) {
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store'
@@ -2476,7 +2492,7 @@ async function serve (options = {}) {
   // async handler is an unhandled rejection, and that ends the process — which
   // is exactly what made the call page sometimes fail to load at all: the port
   // was still in the heartbeat file, but nothing was listening on it.
-  const server = http.createServer((req, res) => {
+  const onRequest = (req, res) => {
     handle(req, res).catch((error) => {
       logLine('warn', 'voice request failed', { path: req.url, error: error.message })
       try {
@@ -2486,7 +2502,8 @@ async function serve (options = {}) {
         // The socket is already gone.
       }
     })
-  })
+  }
+  const server = http.createServer(onRequest)
 
   // A page reloaded while its event stream is open, or a phone that sleeps
   // mid-request, must not leave a socket that holds the next request up.
@@ -2548,10 +2565,44 @@ async function serve (options = {}) {
   })
 
   const actualPort = server.address().port
+  // The phone reaches the line over the tailnet, never over loopback. With the
+  // default bind (127.0.0.1) a second listener is opened on this machine's
+  // tailnet address, so the call link loads without `tailscale serve` at all.
+  // The same handler, token and event stream serve both listeners; when the
+  // tailnet is down the second bind fails quietly and loopback stays.
+  const site = tailnet.status()
+  const loopbackBind = /^(?:127\.0\.0\.1|localhost|::1)$/i.test(String(host))
+  const extraServers = []
+  let tailnetHost = ''
+  if (loopbackBind && site.ip) {
+    const listener = http.createServer(onRequest)
+    listener.keepAliveTimeout = 5000
+    listener.on('error', (error) => {
+      logLine('warn', 'voice tailnet listener unavailable', {
+        host: site.ip,
+        error: error.message
+      })
+    })
+    const bound = await new Promise((resolve) => {
+      listener.once('error', () => resolve(false))
+      try {
+        listener.listen(actualPort, site.ip, () => resolve(true))
+      } catch {
+        resolve(false)
+      }
+    })
+    if (bound) {
+      extraServers.push(listener)
+      tailnetHost = site.ip
+      logEvent('voice.tailnet_listener', { host: site.ip, port: actualPort })
+    }
+  }
+
   const heartbeat = {
     pid: process.pid,
     port: actualPort,
     host,
+    ...(tailnetHost ? { tailnetHost } : {}),
     startedAt: new Date().toISOString()
   }
   try {
@@ -2575,6 +2626,13 @@ async function serve (options = {}) {
       }
     }
     clients.clear()
+    for (const listener of extraServers) {
+      try {
+        listener.close()
+      } catch {
+        // Ignore.
+      }
+    }
     try {
       server.close()
     } catch {
@@ -2593,7 +2651,10 @@ async function serve (options = {}) {
     close,
     port: actualPort,
     host,
-    url: `${current.publicUrl || `http://${host === '0.0.0.0' ? '<tailscale-ip>' : host}:${actualPort}`}/call/${secret}`
+    tailnetHost,
+    tailnet: site,
+    hosts: [host, ...(tailnetHost ? [tailnetHost] : [])],
+    url: `${current.publicUrl || `http://${tailnetHost || (host === '0.0.0.0' ? '<tailscale-ip>' : host)}:${actualPort}`}/call/${secret}`
   }
 }
 
@@ -2611,11 +2672,17 @@ async function serveCommand (argv = []) {
   // the link that works.
   const url = plan.url
   console.log(`sfreebuff voice line listening on ${plan.host}:${plan.port}`)
+  if (plan.tailnetHost) console.log(`  also on the tailnet at ${plan.tailnetHost}:${plan.port}`)
   console.log(`call it from the phone: ${url}`)
-  if (plan.host === '127.0.0.1') {
-    console.log('for the phone, put it on the tailnet with HTTPS:')
+  const current = settings()
+  if (!current.publicUrl) {
+    const site = tailnet.status()
+    console.log('the link above opens on the tailnet; iOS needs HTTPS for the microphone:')
     console.log(`  tailscale serve --bg ${plan.port}`)
-    console.log('then set the phone URL: sfreebuff voice url https://<machine>.<tailnet>.ts.net')
+    console.log(`  sfreebuff voice url https://${site.dnsName || '<machine>.<tailnet>.ts.net'}`)
+  }
+  for (const line of tailnet.problems({ port: plan.port, publicUrl: current.publicUrl, advice: false })) {
+    console.log(`note: ${line}`)
   }
   if (printUrl) console.log(url)
   logLine('info', 'voice.serve', { host: plan.host, port: plan.port })
@@ -2666,15 +2733,22 @@ async function voiceCommand (argv = []) {
     const current = settings()
     const live = running()
     const pending = readPending()
+    const site = tailnet.status({ fresh: true })
     console.log(`voice calls   ${current.enabled ? 'on' : 'off'}`)
     console.log(`server        ${live ? `running (pid ${live.pid}, ${live.host}:${live.port})` : 'stopped'}`)
     console.log(`call link     ${current.enabled || live ? callUrl() : 'off — sfreebuff voice on'}`)
+    console.log(`tailnet       ${tailnet.describe(site)}`)
     console.log(`push rings    ${current.ntfy ? `ntfy topic "${current.ntfy}"` : 'off — sfreebuff voice ntfy auto'}`)
     console.log(`model         ${current.llmModel} at ${current.llmUrl}`)
     console.log(`language      ${current.lang}`)
     console.log(`model key     ${current.llmKey ? 'set' : 'none'}`)
     console.log(`persona       ${current.persona ? `own instructions (${current.persona.length} characters)` : 'default'}`)
     console.log(`waiting       ${pending.length === 0 ? 'nothing' : `${pending.length} call${pending.length === 1 ? '' : 's'}`}`)
+    if (current.enabled || live) {
+      for (const line of tailnet.problems({ port: current.port, publicUrl: current.publicUrl }, site)) {
+        console.log(`fix           ${line}`)
+      }
+    }
     console.log('voice         system voice on the phone (install a Premium voice for the best sound)')
     return 0
   }
@@ -2686,12 +2760,23 @@ async function voiceCommand (argv = []) {
       return 0
     }
     const server = await ensureServer({ waitMs: 3000 })
+    const site = tailnet.status({ fresh: true })
     console.log(`voice calls on — call link: ${callUrl()}`)
     console.log(server
       ? `voice line running on ${server.host}:${server.port}`
       : 'the voice line could not start — run `sfreebuff voice serve` to see why')
-    console.log('from the phone: put it on the tailnet with HTTPS (tailscale serve --bg 8787),')
-    console.log('then `sfreebuff voice url https://<machine>.<tailnet>.ts.net`.')
+    if (!current.publicUrl) {
+      if (site.ip) {
+        console.log('the link above opens on the tailnet; iOS needs HTTPS for the microphone:')
+        console.log(`  tailscale serve --bg ${current.port}`)
+        console.log(`  sfreebuff voice url https://${site.dnsName || '<machine>.<tailnet>.ts.net'}`)
+      } else {
+        console.log('no tailnet address found — is Tailscale connected here? (`sfreebuff voice status`)')
+      }
+    }
+    for (const line of tailnet.problems({ port: current.port, publicUrl: current.publicUrl, advice: false }, site)) {
+      console.log(`fix: ${line}`)
+    }
     return 0
   }
 

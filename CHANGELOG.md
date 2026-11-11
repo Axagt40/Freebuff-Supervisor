@@ -2,6 +2,46 @@
 
 All notable changes to FREEBUFF SUPERVISOR are documented here.
 
+## [1.0.2] — 2026-11-11
+
+A release for long unattended tasks, plus a phone link that opens on the phone.
+
+### Added
+
+- **Force continue**, an off-by-default settings switch for very large tasks.
+  freebuff stops after each phase even when told to finish everything, so the
+  supervisor now types a continue prompt into the same conversation one minute
+  after a finished turn, repeating until the agent says it is done. The prompt
+  asks it to re-read the original request, work through every remaining phase
+  and end with `FREEBUFFS ALL TASKS COMPLETE`. It can be replaced with your own
+  text from the settings screen (`e`), and an empty edit restores the default;
+  the completion line is appended to a custom prompt as well.
+- **Shutdown timer**, an off-by-default settings switch that marks the work done
+  when the agent writes that completion line and arms `wait-and-poweroff.sh`
+  for the session, with a 15-minute backup deadline. The machine powers off
+  when the session ends instead of staying on all night; starting a new session
+  cancels a pending poweroff.
+
+### Fixed
+
+- **The call page loads from the phone.** The voice line listens on this
+  machine's Tailscale address as well as loopback, and the call link uses that
+  address instead of the `127.0.0.1` no phone can open. A link that arrives with
+  a trailing slash is answered instead of rejected as unauthorized.
+- **A grey dot on the phone is explained.** `sfreebuff voice status` and
+  `doctor` read `tailscale status` and name the cause — tailscaled not running,
+  a stopped backend, an offline node or an expired key — with the command that
+  fixes it, and warn when `tailscale serve` is not proxying the line.
+- **A session row no longer shows a blank folder.** Records without a stored
+  `cwd` now take it from their own `--cwd` launch argument, and failing that
+  from the folder the account was last used in.
+- The settings screen keeps its switches and buttons on a short terminal, and
+  no longer leaves the previous frame's text under a changed row.
+
+### Changed
+
+- Version bumped to 1.0.2 in the package, dashboard header and documentation.
+
 ## [1.0.1] — 2026-11-10
 
 A reliability release. Sessions keep their folder, keep their conversation, and

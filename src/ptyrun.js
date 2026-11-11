@@ -21,6 +21,7 @@ const { decide } = require('./answers')
 const dialog = require('./dialog')
 const live = require('./live')
 const limits = require('./limits')
+const optimize = require('./optimize')
 const { logLine, logEvent } = require('./log')
 
 const SCAN_WINDOW = 4000
@@ -36,6 +37,14 @@ const DIALOG_TTL_MS = 5 * 60 * 1000
 const DIALOG_GONE_MS = 10 * 60 * 1000
 /** A repeated answer (a retry screen) may be pressed again this often. */
 const REPEAT_ANSWER_MS = 4000
+/**
+ * How long after the force-continue prompt is typed before its echo stops
+ * counting as the agent's own completion line. The prompt itself names the
+ * line, so the conversation it types into contains it; waiting out the echo is
+ * what keeps the supervisor from marking a task finished the moment it asks
+ * freebuff to continue.
+ */
+const FORCE_MARKER_GRACE_MS = 15 * 1000
 /** How long after starting a resumed session to type the continue prompt. */
 const DEFAULT_RESUME_MS = 8 * 1000
 /** How quiet the TUI must be before that prompt is typed. */
@@ -403,6 +412,13 @@ function screenGrid (text) {
   return rows.map((cells) => (cells || []).join(''))
 }
 
+/** Is the agent's own "every task is complete" line on screen? */
+function markerOnScreen (buffer, marker) {
+  if (!marker) return false
+  const pattern = String(marker).split(/\s+/).join('\\s+')
+  return new RegExp(pattern, 'i').test(plainScreen(String(buffer)).replace(/\s+/g, ' '))
+}
+
 /** The recent screen as clean, trimmed rows. */
 function screenRows (buffer) {
   return screenGrid(String(buffer).slice(-SCREEN_TAIL))
@@ -492,6 +508,9 @@ function runOnPty (options) {
     cwd: options.cwd || process.cwd(),
     env: options.env || process.env
   })
+  // Low-CPU mode: the pty child is the freebuff process, so its niceness also
+  // covers every command the agent runs under it.
+  optimize.apply(child.pid)
 
   // A pty child that has been reaped leaves its pid number free to be handed
   // to another process, while node-pty's kill() passes that number straight to
@@ -529,6 +548,10 @@ function runOnPty (options) {
   let answered = 0
   let escalated = 0
   let nudges = 0
+  // The agent said every task is complete, and when the force prompt was last
+  // typed (its echo names the completion line and must not count).
+  let forceDone = false
+  let lastForcedAt = 0
   let lastAnswerAt = 0
   let lastOutputAt = Date.now()
   const startedAt = Date.now()
@@ -803,7 +826,12 @@ function runOnPty (options) {
         // growing interval, instead of being dropped after a few tries.
         max: options.nudge.max === undefined
           ? Infinity
-          : Math.max(0, options.nudge.max)
+          : Math.max(0, options.nudge.max),
+        // Force continue pushes again straight after each finished turn instead
+        // of backing off: a phase that stopped is exactly what it exists for.
+        backoff: options.nudge.backoff !== false,
+        // The agent's own completion line, when force continue asks for one.
+        doneMarker: options.nudge.doneMarker || null
       }
     : null
 
@@ -921,6 +949,7 @@ function runOnPty (options) {
 
   const nudgeTimer = nudge && nudge.max > 0
     ? setInterval(() => {
+        if (forceDone) return
         if (nudges >= nudge.max) return
         if (pendingDialog) return
         // A prompt still waiting to be sent owns the input box; typing more at
@@ -935,17 +964,22 @@ function runOnPty (options) {
         if (boxHoldsMessage()) return
         if (Date.now() - lastOutputAt < nudge.idleMs) return
         // Every ignored nudge doubles the wait, up to the cap. The session is
-        // never abandoned; it is just not typed at every few seconds.
-        const gap = Math.min(
-          MAX_NUDGE_GAP_MS,
-          nudge.idleMs * 2 ** Math.max(0, nudges - 1)
-        )
+        // never abandoned; it is just not typed at every few seconds. Force
+        // continue keeps the gap fixed: a finished phase should be picked up
+        // within a minute, not after half an hour.
+        const gap = nudge.backoff
+          ? Math.min(
+              MAX_NUDGE_GAP_MS,
+              nudge.idleMs * 2 ** Math.max(0, nudges - 1)
+            )
+          : nudge.idleMs
         if (lastNudgeAt && Date.now() - lastNudgeAt < gap) return
         nudges += 1
         lastNudgeAt = Date.now()
         lastOutputAt = Date.now()
         logLine('info', 'session nudged', { nudge: nudges })
         logEvent('session.nudge', { nudge: nudges, after: nudge.idleMs })
+        lastForcedAt = Date.now()
         typeThenEnter(nudge.text)
       }, Math.max(2000, Math.min(30000, Math.floor(nudge.idleMs / 4))))
     : null
@@ -1523,6 +1557,30 @@ function runOnPty (options) {
     buffer = (buffer + chunk).slice(-SCAN_WINDOW)
     screen = (screen + chunk).slice(-HELP_WINDOW)
 
+    // The agent wrote its own "every task is complete" line. Only believed
+    // once a force prompt has been sent and its echo has had time to leave the
+    // stream, so the prompt we typed cannot mark the task finished itself.
+    if (
+      nudge && nudge.doneMarker && !forceDone && nudges > 0 &&
+      Date.now() - lastForcedAt >= FORCE_MARKER_GRACE_MS &&
+      markerOnScreen(buffer, nudge.doneMarker)
+    ) {
+      forceDone = true
+      if (nudgeTimer) clearInterval(nudgeTimer)
+      logLine('info', 'session reported every task complete')
+      logEvent('session.finished', { after: nudges })
+      if (options.onFinished) {
+        try {
+          options.onFinished({
+            pid: Number.isInteger(child.pid) && child.pid > 1 ? child.pid : null,
+            nudges
+          })
+        } catch {
+          // A failing hook must not take the session down.
+        }
+      }
+    }
+
     // Does the TUI take mouse input? Clicking the input box is only safe when
     // it has asked the terminal for mouse reports.
     const chunkText = String(chunk)
@@ -1611,6 +1669,8 @@ function runOnPty (options) {
         answered,
         escalated,
         nudges,
+        // The agent said every task is complete rather than merely going quiet.
+        finished: forceDone,
         resumed,
         enterRetries,
         resends,
@@ -1718,6 +1778,8 @@ module.exports = {
   MAX_LIMIT_RETYPES,
   LIMIT_REPORT_MS,
   BUSY_FRESH_MS,
+  FORCE_MARKER_GRACE_MS,
+  markerOnScreen,
   promptOnScreen,
   inputBoxIdle,
   busyOnScreen,

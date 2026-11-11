@@ -1,4 +1,4 @@
-# FREEBUFF SUPERVISOR — v1.0.1
+# FREEBUFF SUPERVISOR — v1.0.2
 
 An unattended supervisor for [freebuff](https://freebuff.com) coding sessions.
 
@@ -13,9 +13,9 @@ dashboard: every account, its credits, and every session, one keypress from
 starting work.
 
 ```
-  FREEBUFFS  supervisor dashboard  v1.0.1                            23:12:04
+  FREEBUFFS  supervisor dashboard  v1.0.2                            23:12:04
 ────────────────────────────────────────────────────────────────────────────
-  FREEBUFF SUPERVISOR v1.0.1 — freebuff sessions, kept running unattended
+  FREEBUFF SUPERVISOR v1.0.2 — freebuff sessions, kept running unattended
   ACCOUNTS  2/2 signed in
    ＋ add account  sign in another freebuff account
    ● account-1    signed in   1 live   6 sess    12m ago        480
@@ -61,7 +61,7 @@ Nothing is started and no session runs until you ask for one.
 **From a downloaded package folder** — the same thing, offline:
 
 ```bash
-tar -xzf freebuff-supervisor-1.0.1.tgz
+tar -xzf freebuff-supervisor-1.0.2.tgz
 cd package
 sh install.sh
 ```
@@ -69,7 +69,7 @@ sh install.sh
 **With npm**, if you prefer a global install:
 
 ```bash
-npm install -g ./freebuff-supervisor-1.0.1.tgz
+npm install -g ./freebuff-supervisor-1.0.2.tgz
 sfreebuff --version
 ```
 
@@ -142,7 +142,7 @@ and session, with credits coloured green → yellow → red as they run down.
 | `l` | open sign-in for the account |
 | `a` | add an account (`＋ add account` is also a row) |
 | `d` | remove the account under the cursor (press twice; refuses a live one) |
-| `s` | settings — the **Voice calls** switch |
+| `s` | settings — voice, optimization, force continue and shutdown switches |
 | `r` | redraw |
 | `q` | quit |
 
@@ -154,6 +154,30 @@ and runs `--no-sudo` since nobody is at its keyboard. A session it starts is
 **continues** that one — the supervisor resumes the chat and types the continue
 prompt. Rows for sessions that are no longer running are shown as `lost`, never
 as `live`, and `x` clears a stale record instead of leaving it behind forever.
+
+Settings has four switches, all but voice off by default: **Voice calls** (the
+phone line); **Optimization**, which starts sessions at a lower CPU priority so
+two busy sessions cannot starve the desktop on a small machine (turning it on
+also lowers the priority of sessions already running); **Force continue**; and
+the **Shutdown timer**.
+
+**Force continue** exists for very large tasks. freebuff splits the work into
+phases and then stops at its prompt after one of them, even when it was told to
+finish everything. With the switch on, the supervisor types a continue prompt
+into the same conversation a minute after a finished turn and keeps doing that
+until the agent reports it is done. The prompt asks freebuff to re-read the
+original request, carry on with every remaining phase, never stop after one,
+and end with `FREEBUFFS ALL TASKS COMPLETE` when, and only when, everything is
+finished. `e` on the row (or the prompt button) edits that text, and an empty
+edit restores the built-in wording; the completion line is always appended to a
+custom prompt so "done" stays detectable.
+
+**Shutdown timer** powers the machine off once the agent writes that completion
+line, using the included `wait-and-poweroff.sh` (logind, no password). It waits
+for the session's processes to end, with a 15-minute backup deadline, so a
+finished task cannot leave the machine on all night and a hung one cannot keep
+it on forever. It turns force continue on with it, because that is what produces
+the completion line. Starting a new session cancels a pending poweroff.
 
 Piped output is one plain snapshot, so `sfreebuff dashboard` also works in a
 script.
@@ -212,9 +236,14 @@ sfreebuff voice status            # call link and settings
 ```
 
 The webhook is stored in `~/.freebuffs/config.json`, readable only by you, and
-is never printed or logged. The voice page is served locally and reached over
-Tailscale (`tailscale serve --bg 8787`); speech recognition and speech synthesis
-run on the phone, so audio never reaches the machine.
+is never printed or logged. The voice page is served on loopback and on this
+machine's Tailscale address, so the call link opens from the phone as soon as it
+is on the tailnet. iOS still needs HTTPS for the microphone: run
+`tailscale serve --bg 8787`, then `sfreebuff voice url
+https://<machine>.<tailnet>.ts.net`. If the Tailscale app shows the machine with
+a grey dot, `sfreebuff voice status` (or `doctor`) names the cause and the fix.
+Speech recognition and speech synthesis run on the phone, so audio never reaches
+the machine.
 
 ## Data and configuration
 
@@ -235,33 +264,35 @@ state in `~/.config/manicode` and in `~/.freebuffs` after you run it.
 Frequently used settings: `FREEBUFFS_RESTART_MS`, `FREEBUFFS_STALL_MS`,
 `FREEBUFFS_NUDGE_MS`, `FREEBUFFS_MAX_FAST_FAILURES`,
 `FREEBUFFS_MAX_CLEAN_RESUMES`, `FREEBUFFS_LIMIT_WAIT_MS`, `FREEBUFFS_SUDO=0`,
-`FREEBUFFS_PTY=0`, `FREEBUFFS_MONITOR_WINDOW=0`, `FREEBUFFS_CREDITS=0`.
+`FREEBUFFS_PTY=0`, `FREEBUFFS_MONITOR_WINDOW=0`, `FREEBUFFS_CREDITS=0`,
+`FREEBUFFS_VOICE_TAILNET_IP` (force the phone link's address, or `off`).
 
-## What's new in 1.0.1
+## What's new in 1.0.2
 
-A reliability release: sessions keep their place, keep their task, and keep
-working through the failures that used to leave them idle.
+Long unattended tasks, and a phone line that actually opens on the phone.
 
-- **Restarts no longer land on the project picker.** A relaunch, or a
-  `--continue` started from the home folder, recovers the most recently used
-  real project instead of opening freebuff's folder list, which an unattended
-  session could never leave. A **new** session still leaves the folder choice
-  to you.
-- **A resumed conversation is not re-explained.** When the chat really is
-  resumed, the session is told to continue from where it stopped instead of
-  being handed the whole task again on every restart.
-- **The task comes from the conversation being resumed**, not from the account
-  history that lags several turns behind it, so a restart picks up the actual
-  latest instruction.
-- **Network timeouts are retried.** A dropped connection or timed-out request
-  is recognised, and the message is sent again rather than the session being
-  left waiting or counted as dead.
-- **An error screen is pushed past.** A session sitting on an error now gets the
-  task again after the screen settles, instead of looking alive until the
-  stall watch fires twenty minutes later.
-- **Quoted prompts no longer freeze a session.** A finished turn that merely
-  mentions a yes/no question is not treated as a blocking dialog, so nudges
-  keep flowing and the phone does not ring over prose.
+- **Force continue** (Settings, off by default) types a continue prompt into the
+  same conversation a minute after each finished turn, so freebuff works
+  through every phase of a large task instead of stopping after the first. The
+  prompt is editable and always ends by asking for
+  `FREEBUFFS ALL TASKS COMPLETE`.
+- **Shutdown timer** (off by default) powers the machine off once the agent
+  writes that completion line, with a 15-minute backup deadline; starting a new
+  session cancels a pending poweroff.
+- **Optimization** (off by default) runs supervised sessions at a lower CPU
+  priority, including the sessions already running, so two busy sessions cannot
+  starve a small machine.
+- **The call page opens from the phone.** The voice line also listens on the
+  machine's Tailscale address and the link uses it instead of `127.0.0.1`; a
+  trailing slash on the link works too.
+- **A grey dot is explained.** `voice status` and `doctor` name why the phone
+  cannot reach the machine — tailscaled stopped, backend down, node offline or
+  an expired key — with the command that fixes it, and warn when
+  `tailscale serve` is not proxying the port.
+- **A session row always has a folder**, recovered from `--cwd` or from the
+  folder the account was last used in instead of showing a blank cell.
+- The settings screen fits a short terminal and no longer leaves the previous
+  frame's text under a changed row.
 - Stale `--cwd` values are replaced when a restart recovers a different folder,
   and the idle nudge moved to seven minutes with short, non-disruptive text.
 

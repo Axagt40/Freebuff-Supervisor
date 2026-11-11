@@ -25,6 +25,8 @@ const { activeMonitors } = require('./status')
 const { windowCommand } = require('./terminal')
 const { requestStop } = require('./supervise')
 const voice = require('./voice')
+const optimize = require('./optimize')
+const overnight = require('./overnight')
 const {
   processMatches,
   sessionAlive,
@@ -81,6 +83,40 @@ function painter (enabled) {
   return (code, text) => (enabled ? `\u001b[${code}m${text}\u001b[0m` : text)
 }
 
+/** `--cwd <folder>` from a session's recorded arguments, if it has one. */
+function cwdFromArgs (args) {
+  const list = Array.isArray(args) ? args : []
+  for (let index = 0; index < list.length; index += 1) {
+    const arg = String(list[index])
+    if (arg === '--cwd' && list[index + 1]) return String(list[index + 1])
+    if (arg.startsWith('--cwd=')) return arg.slice('--cwd='.length)
+  }
+  return ''
+}
+
+/**
+ * The folder a recorded session ran in.
+ *
+ * Records written before the folder was stored, or by a launch whose working
+ * directory was not recorded, used to show a blank cell in the session list.
+ * The launch arguments carry `--cwd`; when even those are missing, the folder
+ * the account was last used in is the best remaining answer.
+ */
+function sessionCwd (session, state) {
+  if (!session) return ''
+  const own = typeof session.cwd === 'string' ? session.cwd.trim() : ''
+  if (own) return own
+  const fromArgs = cwdFromArgs(session.args)
+  if (fromArgs) return fromArgs
+  const accountId = session.accountId
+  if (!accountId || !state || !state.lastAccountByCwd) return ''
+  let found = ''
+  for (const [cwd, usedBy] of Object.entries(state.lastAccountByCwd)) {
+    if (usedBy === accountId && cwd) found = cwd
+  }
+  return found
+}
+
 /** Everything the view needs, read from the same files `status` uses. */
 function collect (options = {}) {
   const now = options.now ?? Date.now()
@@ -108,7 +144,7 @@ function collect (options = {}) {
     .map((session) => ({
       id: session.id,
       account: session.accountId,
-      cwd: session.cwd,
+      cwd: sessionCwd(session, state),
       pid: session.pid,
       launcherPid: session.launcherPid,
       startedAt: session.startedAt,
@@ -155,7 +191,9 @@ function collect (options = {}) {
     lost: lostSessions.length,
     signedIn: accountViews.filter((account) => account.signedIn).length,
     monitors: monitors.length,
-    voice: voice.summary()
+    voice: voice.summary(),
+    optimize: { enabled: optimize.enabled() },
+    ...overnight.summary()
   }
 }
 
@@ -195,8 +233,12 @@ function creditsWidth (accountsView) {
 
 /**
  * The settings screen: the supervisor-wide switches, drawn in place of the
- * dashboard. Voice calls is the one that matters here: turning it on starts
- * the phone line, and the row itself is the toggle (click it, or press enter).
+ * dashboard.
+ *
+ * Voice calls turns the phone line on and off; Optimization runs every
+ * supervised session at a lower CPU priority, which is what keeps a small
+ * machine usable when two sessions are busy at once. Both are switches: the
+ * row itself is the toggle (click it, or press enter/space on it).
  */
 function buildSettingsView (model, options = {}) {
   const layout = { accounts: [], sessions: [], settings: [], buttons: [] }
@@ -213,97 +255,195 @@ function buildSettingsView (model, options = {}) {
     ntfy: false,
     model: ''
   }
+  const optimizeState = model.optimize || { enabled: false }
+  const forceState = model.forceContinue || { enabled: false, custom: '', prompt: '' }
+  const shutdownState = model.shutdownTimer || { enabled: false }
+  const editing = options.promptEdit === undefined || options.promptEdit === null
+    ? null
+    : String(options.promptEdit)
+  const chosen = Math.min(
+    Math.max(0, Number.isInteger(selected.settings) ? selected.settings : 0),
+    3
+  )
 
   const muted = (text) => paint('38;5;244', text)
   const title = (text) => paint('1;38;5;45', text)
   const rule = paint('38;5;238', '─'.repeat(width))
-  const lines = []
   const clock = new Date(model.now || Date.now())
-  lines.push(
+  const lines = []
+  // Header and switch rows survive a short terminal; the prose around them is
+  // what gets dropped when there is no room.
+  const add = (text, fixed = false) => {
+    const entry = { text, fixed }
+    lines.push(entry)
+    return entry
+  }
+
+  add(
     pad(`  ${title('FREEBUFFS')}  ${muted('settings')}`, width - 10) +
-    muted(clock.toTimeString().slice(0, 8).padStart(8))
+    muted(clock.toTimeString().slice(0, 8).padStart(8)),
+    true
   )
-  lines.push(rule)
-  lines.push('')
+  add(rule, true)
+  add('', true)
 
-  const chosen = selected.settings === 0
-  const marker = chosen ? paint('1;38;5;45', '▸') : ' '
-  const switchText = state.enabled
-    ? paint('1;38;5;16;48;5;45', ' voice calls ON ')
-    : paint('2;38;5;240', ' voice calls off ')
-  lines.push(` ${marker} ${pad('Voice calls', 22)}${switchText}`)
-  layout.settings.push({ index: 0, y: lines.length - 1 })
-
-  const detail = state.enabled
-    ? 'Freebuff rings the phone and reads out a decision it needs. The phone can call in too.'
-    : 'Let freebuff call you when it needs a decision, and call it from the phone over Tailscale.'
-  for (const row of wrap(detail, Math.max(20, width - 6))) {
-    lines.push(`     ${muted(row)}`)
-  }
-  lines.push('')
-
-  const rows = [
-    ['link', state.url || 'off — turn voice calls on to get a call link'],
-    ['server', state.running
-      ? 'running'
-      : (state.enabled ? 'starting, or stopped — `sfreebuff voice serve`' : 'stopped')],
-    ['push', state.ntfy
-      ? 'ntfy app configured'
-      : 'off — an open call page still rings (`sfreebuff voice ntfy auto`)'],
-    ['brain', state.model
-      ? `${state.model} (local, unlimited)`
-      : 'not configured — the built-in supervisor replies are used'],
-    ['voice', 'the phone\'s own voice — install a Premium voice for the best sound']
+  const switches = [
+    {
+      label: 'Voice calls',
+      on: Boolean(state.enabled),
+      action: 'toggle-voice',
+      detail: state.enabled
+        ? 'Freebuff rings the phone and reads out a decision it needs. The phone can call in too.'
+        : 'Let freebuff call you when it needs a decision, and call it from the phone over Tailscale.',
+      rows: [
+        ['link', state.url || 'off — turn voice calls on to get a call link'],
+        ['server', state.running
+          ? 'running'
+          : (state.enabled ? 'starting, or stopped — `sfreebuff voice serve`' : 'stopped')],
+        ['push', state.ntfy
+          ? 'ntfy app configured'
+          : 'off — an open call page still rings (`sfreebuff voice ntfy auto`)'],
+        ['brain', state.model
+          ? `${state.model} (local, unlimited)`
+          : 'not configured — the built-in supervisor replies are used'],
+        ['voice', 'the phone\'s own voice — install a Premium voice for the best sound']
+      ]
+    },
+    {
+      label: 'Optimization',
+      on: Boolean(optimizeState.enabled),
+      action: 'toggle-optimize',
+      detail: 'Runs sessions at a lower CPU priority, so several at once cannot starve the desktop on a small machine.',
+      rows: [
+        ['state', optimizeState.enabled
+          ? `on — sessions start at nice ${optimize.LOW_PRIORITY}`
+          : 'off — sessions run at normal priority'],
+        ['applies', 'to new sessions, and at once to the ones already running']
+      ]
+    },
+    {
+      label: 'Force continue',
+      on: Boolean(forceState.enabled),
+      action: 'toggle-force',
+      detail: 'Types a continue prompt at freebuff when it stops after a phase, so a big task is not left half done overnight.',
+      rows: [
+        ['prompt', forceState.custom
+          ? `custom — "${clip(forceState.custom, Math.max(18, width - 24))}"`
+          : 'default — continue every remaining phase, then say all tasks complete'],
+        ['push', `after ${Math.round(overnight.FORCE_IDLE_MS / 1000)}s with no turn running; e edits the prompt`]
+      ]
+    },
+    {
+      label: 'Shutdown timer',
+      on: Boolean(shutdownState.enabled),
+      action: 'toggle-shutdown',
+      detail: 'Powers the machine off once freebuff reports that every task is complete instead of leaving it on all night.',
+      rows: [
+        ['timer', shutdownState.enabled
+          ? `on — power off once done, or after ${overnight.SHUTDOWN_BACKUP_MINUTES}m`
+          : 'off — the machine stays on when the work is finished'],
+        ['needs', 'force continue on, so freebuff itself says when everything is done']
+      ]
+    }
   ]
-  for (const [label, value] of rows) {
-    lines.push(`     ${muted(pad(label, 8))}${clip(value, Math.max(10, width - 18))}`)
-  }
-  lines.push('')
-  lines.push(`  ${muted('Enter or space switches it on or off. Opening the link on the phone is the call.')}`)
 
-  const spare = height - lines.length - 5
-  if (spare > 0) lines.push(...Array(spare).fill(''))
-  lines.push(rule)
+  const rowEntries = []
+  switches.forEach((setting, index) => {
+    const active = chosen === index
+    const marker = active ? paint('1;38;5;45', '▸') : ' '
+    // The switch reads as one: a filled block when on, a dim one when off.
+    const switchText = setting.on
+      ? paint('1;38;5;16;48;5;45', ` ${setting.label.toLowerCase()} ON `)
+      : paint('2;38;5;240', ` ${setting.label.toLowerCase()} off `)
+    const entry = add(` ${marker} ${pad(setting.label, 22)}${switchText}`, true)
+    rowEntries.push({ index, action: setting.action, entry })
 
+    for (const row of wrap(setting.detail, Math.max(20, width - 6))) {
+      add(`     ${muted(row)}`)
+    }
+    // The selected switch explains itself fully; the other stays a summary, so
+    // a small terminal is not all prose.
+    if (active) {
+      for (const [label, value] of setting.rows) {
+        add(`     ${muted(pad(label, 8))}${clip(value, Math.max(10, width - 18))}`)
+      }
+    }
+    add('')
+  })
+
+  add(`  ${muted('Enter or space switches the selected row on or off, or click it.')}`)
+
+  // The actions are pinned to the bottom and the prose above them is dropped
+  // when the screen is short: this screen used to push its own buttons off the
+  // bottom of a small terminal, leaving no visible way back.
   const buttons = [
-    { action: 'toggle-voice', label: `space ${state.enabled ? 'turn off' : 'turn on'}`, enabled: true },
+    {
+      action: switches[chosen].action,
+      label: `space turn ${switches[chosen].on ? 'off' : 'on'}`,
+      enabled: true
+    },
+    // Only the force continue row has a prompt to edit.
+    ...(chosen === 2
+      ? [{ action: 'edit-prompt', label: 'e prompt', enabled: true }]
+      : []),
     { action: 'settings-back', label: 'esc back', enabled: true },
     { action: 'quit', label: 'q quit', enabled: true }
   ]
   const buttonRows = []
-  let row = { items: [], text: '  ' }
+  let buttonRow = { items: [], text: '  ' }
   for (const button of buttons) {
     const text = `[ ${button.label} ]`
-    if (row.items.length > 0 && row.text.length + text.length + 1 > width) {
-      buttonRows.push(row)
-      row = { items: [], text: '  ' }
+    if (buttonRow.items.length > 0 && buttonRow.text.length + text.length + 1 > width) {
+      buttonRows.push(buttonRow)
+      buttonRow = { items: [], text: '  ' }
     }
-    row.items.push({ button, text, start: row.text.length })
-    row.text += `${text} `
+    buttonRow.items.push({ button, text, start: buttonRow.text.length })
+    buttonRow.text += `${text} `
   }
-  buttonRows.push(row)
+  buttonRows.push(buttonRow)
 
-  const footerStart = lines.length
-  lines.push(...buttonRows.map((entry) => '  ' + entry.items.map((item) =>
-    color ? `\u001b[1;38;5;16;48;5;45m${item.text}\u001b[0m` : item.text
-  ).join(' ')))
+  const footer = [
+    rule,
+    ...buttonRows.map((entry) => '  ' + entry.items.map((item) =>
+      color ? `\u001b[1;38;5;16;48;5;45m${item.text}\u001b[0m` : item.text
+    ).join(' ')),
+    editing !== null
+      ? `  ${muted('prompt')} ${clip(editing, Math.max(10, width - 12))}▌`
+      : message
+        ? `  ${muted(clip(message, width - 4))}`
+        : muted('  shared by every supervisor on this machine'),
+    ...(editing !== null
+      ? [muted('  enter saves · esc cancels · empty restores the default')]
+      : [])
+  ]
+
+  while (lines.length + footer.length > height) {
+    let index = lines.length - 1
+    while (index >= 0 && lines[index].fixed) index -= 1
+    if (index < 0) break
+    lines.splice(index, 1)
+  }
+
+  const body = lines.map((entry) => entry.text)
+  const footerStart = body.length
+  // Pad every row to the full width. Rows change length as a setting changes
+  // (a link appears, "running" becomes "stopped"), and the untouched tail of
+  // the previous frame used to stay on screen under the new text. The draw
+  // loop clears each row too, for the colour codes padding cannot cover.
+  const visible = [...body, ...footer].slice(0, height).map((line) => pad(line, width))
+
+  layout.settings = rowEntries
+    .map((item) => ({ index: item.index, action: item.action, y: lines.indexOf(item.entry) }))
+    .filter((item) => item.y >= 0 && item.y < visible.length)
   buttonRows.forEach((entry, rowIndex) => {
     for (const item of entry.items) {
       layout.buttons.push({
         action: item.button.action,
         start: item.start,
         end: item.start + item.text.length - 1,
-        y: footerStart + rowIndex
+        y: footerStart + 1 + rowIndex
       })
     }
-  })
-  lines.push(message
-    ? `  ${muted(clip(message, width - 4))}`
-    : muted('  these settings are shared by every supervisor on this machine'))
-
-  const visible = lines.slice(0, height).map((line) => {
-    const plain = line.replace(ANSI, '')
-    return plain.length > width ? plain.slice(0, width - 1) + '…' : line
   })
   for (const key of Object.keys(layout)) {
     if (!Array.isArray(layout[key])) continue
@@ -477,7 +617,7 @@ function buildView (model, options = {}) {
     const row = [
       marker,
       ' ',
-      pad(shortHome(session.cwd), sessionFolderWidth),
+      pad(shortHome(session.cwd || '') || '—', sessionFolderWidth),
       ' ',
       pad(session.account, accountCol),
       pad(state, stateCol),
@@ -825,7 +965,7 @@ function hitTest (layout, x, y) {
     }
   }
   for (const row of layout.settings || []) {
-    if (y === row.y) return { action: 'toggle-voice' }
+    if (y === row.y) return { action: row.action }
   }
   for (const row of layout.accounts || []) {
     if (y === row.y) return { action: 'choose-account', index: row.index }
@@ -875,6 +1015,7 @@ function keyActions (chunk) {
     else if (char === 'r' || char === 'R') actions.push('refresh')
     else if (char === 'q' || char === 'Q') actions.push('quit')
     else if (char === ' ') actions.push('activate')
+    else if (char === 'e' || char === 'E') actions.push('edit-prompt')
     else if (char === '\u001b') actions.push('back')
   }
   return actions
@@ -920,6 +1061,9 @@ async function run (argv = []) {
     let message = duplicates.length > 0
       ? `dropped ${duplicates.join(', ')} — the same account was listed twice`
       : ''
+    // While this is a string the settings screen is editing the automatic
+    // force-continue prompt, and keys are text rather than dashboard commands.
+    let editing = null
     let closed = false
     let refreshing = false
     // Removing an account is the one action here that cannot be undone, so it
@@ -938,12 +1082,16 @@ async function run (argv = []) {
       focus,
       selected,
       screen,
-      message
+      message,
+      promptEdit: editing
     })
 
     const draw = () => {
       if (closed) return
-      stdout.write(`\u001b[H${view().lines.join('\n')}\u001b[J`)
+      // Each row is cleared to its end before the newline: a shorter row in the
+      // next frame (a stopped server, a hidden link) used to leave the tail of
+      // the previous one visible, which read as text drawn over itself.
+      stdout.write(`\u001b[H${view().lines.map((line) => `${line}\u001b[K`).join('\n')}\u001b[J`)
     }
 
     const cleanup = () => {
@@ -1025,6 +1173,66 @@ async function run (argv = []) {
       }
     }
 
+    const toggleOptimize = () => {
+      const before = optimize.enabled()
+      try {
+        optimize.setEnabled(!before)
+        if (!before) {
+          // Apply at once: the machine is already busy when the switch is
+          // pressed, and waiting for the next restart would not help it. Only
+          // pids that still look like their session are touched, so a stale
+          // number cannot lower an unrelated process.
+          for (const session of loadState().sessions) {
+            if (session.endedAt) continue
+            if (processMatches(session.pid, FREEBUFF_COMMAND)) optimize.apply(session.pid)
+            if (processMatches(session.launcherPid, SUPERVISOR_COMMAND)) {
+              optimize.apply(session.launcherPid)
+            }
+          }
+        }
+        message = before
+          ? 'optimization off — new sessions run at normal priority'
+          : 'optimization on — sessions run at a lower CPU priority'
+      } catch (error) {
+        message = `could not change optimization: ${error.message}`
+      }
+    }
+
+    const toggleForce = () => {
+      const before = overnight.forceContinue().enabled
+      try {
+        overnight.setForceContinue(!before)
+        message = before
+          ? 'force continue off — a stopped phase is left for you'
+          : 'force continue on — a stopped freebuff is told to carry on'
+      } catch (error) {
+        message = `could not change force continue: ${error.message}`
+      }
+    }
+
+    const toggleShutdown = () => {
+      const before = overnight.shutdownTimer()
+      try {
+        overnight.setShutdownTimer(!before)
+        if (!before) {
+          // The completion line comes from the force-continue prompt, so the
+          // timer has nothing to wait for without it.
+          if (!overnight.forceContinue().enabled) overnight.setForceContinue(true)
+          message = 'shutdown timer on — the machine powers off once every task is complete'
+        } else {
+          overnight.cancelShutdown()
+          message = 'shutdown timer off — the machine stays on'
+        }
+      } catch (error) {
+        message = `could not change the shutdown timer: ${error.message}`
+      }
+    }
+
+    const startPromptEdit = () => {
+      editing = overnight.forceContinue().custom
+      message = 'type the automatic prompt — enter saves, esc cancels'
+    }
+
     const addNewAccount = () => {
       const result = addAccount({ cwd: process.cwd() })
       if (result.ok) watchLogin()
@@ -1049,11 +1257,43 @@ async function run (argv = []) {
           screen = 'main'
           return
         }
-        if (action === 'toggle-voice' || action === 'activate' || action === 'start') {
+        if (action === 'toggle-voice') {
+          selected.settings = 0
           toggleVoice()
           return
         }
-        if (action === 'up' || action === 'down') selected.settings = 0
+        if (action === 'toggle-optimize') {
+          selected.settings = 1
+          toggleOptimize()
+          return
+        }
+        if (action === 'toggle-force') {
+          selected.settings = 2
+          toggleForce()
+          return
+        }
+        if (action === 'toggle-shutdown') {
+          selected.settings = 3
+          toggleShutdown()
+          return
+        }
+        if (action === 'edit-prompt') {
+          selected.settings = 2
+          startPromptEdit()
+          return
+        }
+        if (action === 'up' || action === 'down') {
+          const step = action === 'up' ? -1 : 1
+          selected.settings = (selected.settings + step + 4) % 4
+          return
+        }
+        if (action === 'activate' || action === 'start') {
+          // Enter and space act on the row the cursor is on, like the mouse.
+          if (selected.settings === 1) toggleOptimize()
+          else if (selected.settings === 2) toggleForce()
+          else if (selected.settings === 3) toggleShutdown()
+          else toggleVoice()
+        }
         return
       }
 
@@ -1209,6 +1449,34 @@ async function run (argv = []) {
     }
 
     const onData = (chunk) => {
+      // The prompt editor owns the keyboard while it is open: letters are text,
+      // not dashboard shortcuts.
+      if (editing !== null) {
+        const typed = String(chunk).replace(/\u001b\[[0-9;?<>=]*[ -/]*[@-~]/g, '')
+        for (const char of typed) {
+          if (char === '\u0003') {
+            finish(0)
+            return
+          }
+          if (char === '\u001b') {
+            editing = null
+            message = 'prompt not changed'
+            break
+          }
+          if (char === '\r' || char === '\n') {
+            const saved = overnight.setForceContinuePrompt(editing)
+            editing = null
+            message = saved
+              ? 'automatic prompt saved'
+              : 'automatic prompt reset to the default'
+            break
+          }
+          if (char === '\u007f' || char === '\b') editing = editing.slice(0, -1)
+          else if (char >= ' ') editing += char
+        }
+        draw()
+        return
+      }
       const clicks = mouseEvents(chunk)
       if (clicks.length > 0) {
         const layout = view().layout
@@ -1281,6 +1549,7 @@ module.exports = {
   stopSession,
   keyActions,
   parseArgs,
+  sessionCwd,
   MAX_ACCOUNT_ROWS,
   MAX_SESSION_ROWS
 }

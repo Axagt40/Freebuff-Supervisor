@@ -7,7 +7,13 @@ const os = require('os')
 const path = require('path')
 
 const voice = require('../src/voice')
+const tailnet = require('../src/tailnet')
 const { fakeSupervisorPid } = require('./helpers')
+
+// The call link is asserted against loopback in this suite: a machine that
+// happens to be on a tailnet must not change the expected URL. The tailnet
+// behaviour has its own tests below, which force the address.
+process.env.FREEBUFFS_VOICE_TAILNET_IP = 'off'
 
 const homes = []
 
@@ -1200,4 +1206,136 @@ test('the queue can be asked about, edited and emptied by voice', async () => {
   assert.equal(cleared.reply, 'Tyhjensin jonon.')
   assert.equal(voice.readTasks().length, 0)
   assert.equal((await voice.answer('mitä on jonossa')).reply, 'Jonossa ei ole mitään.')
+})
+
+test('the call link is the tailnet address, not loopback, when one is known', () => {
+  tempHome()
+  const previous = process.env.FREEBUFFS_VOICE_TAILNET_IP
+  process.env.FREEBUFFS_VOICE_TAILNET_IP = '100.101.102.103'
+  try {
+    voice.updateSettings({ enabled: true, publicUrl: '' })
+    assert.match(
+      voice.callUrl(),
+      /^http:\/\/100\.101\.102\.103:8787\/call\/[a-f0-9]{16,}$/,
+      'a phone cannot open 127.0.0.1, so the tailnet address is the link'
+    )
+  } finally {
+    process.env.FREEBUFFS_VOICE_TAILNET_IP = previous === undefined ? 'off' : previous
+    voice.updateSettings({ publicUrl: '' })
+  }
+})
+
+test('a call link that arrives with a trailing slash still opens the page', async () => {
+  tempHome()
+  const plan = await voice.serve({ port: 0, host: '127.0.0.1' })
+  try {
+    const page = await fetch(`http://127.0.0.1:${plan.port}/call/${voice.token()}/`)
+    assert.equal(page.status, 200, 'the extra slash is the same link')
+    assert.match(await page.text(), /<html/i)
+  } finally {
+    plan.close()
+  }
+})
+
+test('the line listens on the tailnet address as well as loopback', async () => {
+  const previous = process.env.FREEBUFFS_VOICE_TAILNET_IP
+  process.env.FREEBUFFS_VOICE_TAILNET_IP = '127.0.0.2'
+  const plan = await voice.serve({ port: 0 })
+  try {
+    assert.equal(plan.host, '127.0.0.1')
+    if (plan.tailnetHost) {
+      assert.deepEqual(plan.hosts, ['127.0.0.1', '127.0.0.2'])
+      assert.match(plan.url, /^http:\/\/127\.0\.0\.2:\d+\/call\//)
+      const health = await fetch(`http://127.0.0.2:${plan.port}/healthz`)
+      assert.equal(health.status, 200, 'the phone link answers on the tailnet')
+    }
+  } finally {
+    process.env.FREEBUFFS_VOICE_TAILNET_IP = previous === undefined ? 'off' : previous
+    plan.close()
+  }
+})
+
+function stubTailscale (script) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'freebuffs-tailscale-'))
+  homes.push(dir)
+  const file = path.join(dir, 'tailscale')
+  fs.writeFileSync(file, script)
+  fs.chmodSync(file, 0o755)
+  process.env.FREEBUFFS_TAILSCALE_BIN = file
+  return file
+}
+
+test('an offline node is reported as the grey dot, with the fix', () => {
+  tempHome()
+  const previous = process.env.FREEBUFFS_VOICE_TAILNET_IP
+  process.env.FREEBUFFS_VOICE_TAILNET_IP = ''
+  stubTailscale(`#!/bin/sh
+case "$1 $2" in
+  "status --json")
+    echo '{"BackendState":"Stopped","Self":{"Online":false,"DNSName":"arc.tailnet.ts.net.","TailscaleIPs":["100.101.102.103"],"KeyExpiry":"2027-01-01T00:00:00Z"},"CertDomains":["tailnet.ts.net"]}'
+    exit 0 ;;
+  *)
+    exit 1 ;;
+esac
+`)
+  try {
+    const site = tailnet.status({ fresh: true })
+    assert.equal(site.ip, '100.101.102.103')
+    assert.equal(site.dnsName, 'arc.tailnet.ts.net')
+    assert.equal(site.backendState, 'Stopped')
+    assert.equal(site.online, false)
+    assert.match(tailnet.describe(site), /not connected/)
+    const fixes = tailnet.problems({ port: 8787 }, site)
+    assert.ok(fixes.some((line) => /grey dot/.test(line)), 'the phone symptom is named')
+    assert.ok(fixes.some((line) => /systemctl enable --now tailscaled/.test(line)))
+  } finally {
+    delete process.env.FREEBUFFS_TAILSCALE_BIN
+    process.env.FREEBUFFS_VOICE_TAILNET_IP = previous === undefined ? 'off' : previous
+  }
+})
+
+test('a connected node with serve configured has nothing to fix', () => {
+  tempHome()
+  const previous = process.env.FREEBUFFS_VOICE_TAILNET_IP
+  process.env.FREEBUFFS_VOICE_TAILNET_IP = ''
+  stubTailscale(`#!/bin/sh
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  echo '{"BackendState":"Running","Self":{"Online":true,"DNSName":"arc.tailnet.ts.net.","TailscaleIPs":["100.101.102.103","fd7a::1"],"KeyExpiry":"2027-01-01T00:00:00Z"},"CertDomains":["*.tailnet.ts.net"]}'
+  exit 0
+fi
+if [ "$1" = "serve" ]; then
+  echo 'https://arc.tailnet.ts.net (tailnet only) -> http://127.0.0.1:8787'
+  exit 0
+fi
+exit 1
+`)
+  try {
+    const site = tailnet.status({ fresh: true })
+    assert.equal(site.online, true)
+    assert.equal(site.https, true)
+    assert.match(tailnet.describe(site), /connected as arc\.tailnet\.ts\.net/)
+    assert.deepEqual(
+      tailnet.problems({ port: 8787, publicUrl: 'https://arc.tailnet.ts.net' }, site),
+      [],
+      'a working HTTPS call link needs no fix'
+    )
+  } finally {
+    delete process.env.FREEBUFFS_TAILSCALE_BIN
+    process.env.FREEBUFFS_VOICE_TAILNET_IP = previous === undefined ? 'off' : previous
+  }
+})
+
+test('an expired node key is not mistaken for a healthy node', () => {
+  const site = tailnet.parseStatus(JSON.stringify({
+    BackendState: 'Running',
+    Self: {
+      Online: true,
+      DNSName: 'arc.tailnet.ts.net.',
+      TailscaleIPs: ['100.101.102.103'],
+      KeyExpiry: '2020-01-01T00:00:00Z'
+    }
+  }))
+  assert.equal(site.keyExpired, true)
+  assert.match(tailnet.describe(site), /key expired/)
+  assert.ok(tailnet.problems({ port: 8787 }, site).some((line) => /reauth/.test(line)))
 })

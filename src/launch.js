@@ -21,6 +21,7 @@ const notify = require('./notify')
 const voice = require('./voice')
 const sudo = require('./sudo')
 const { supervise, activityStamp, DEFAULT_NUDGE_MS } = require('./supervise')
+const overnight = require('./overnight')
 const limits = require('./limits')
 const credits = require('./credits')
 const {
@@ -146,7 +147,7 @@ function parseLaunchFlags (argv, env = process.env) {
  */
 function nudgeConfig (env = process.env) {
   const custom = String(env.FREEBUFFS_CONTINUE_PROMPT || '').trim()
-  const text = custom ||
+  const baseText = custom ||
     'Continue the unfinished task from the previous session. Inspect the ' +
     'repository and any notes from earlier sessions to see what is already ' +
     'done, then finish the remaining work. Do not start over.'
@@ -157,15 +158,30 @@ function nudgeConfig (env = process.env) {
   const maxRaw = String(env.FREEBUFFS_MAX_NUDGES || '').trim()
   const max = maxRaw === '' ? Infinity : Number(maxRaw)
   const resumeMs = Number(env.FREEBUFFS_RESUME_MS)
+  // Overnight mode, read from the settings file at launch time. Only the real
+  // launch asks for it: a caller passing its own env (the tests) is not a
+  // session, and must not pick up the machine's saved switches.
+  const force = env === process.env
+    ? overnight.forceContinue()
+    : { enabled: false, prompt: '', custom: '' }
+  const forced = Boolean(force.enabled)
   return {
-    text,
+    text: custom || (forced ? force.prompt : baseText),
     // The periodic "keep working" push is short: the conversation already has
-    // the task, so it only has to say to carry on.
-    nudgeText: custom || NUDGE_TEXT,
+    // the task, so it only has to say to carry on. Force continue uses the
+    // long prompt that lists every remaining phase instead.
+    nudgeText: custom || (forced ? force.prompt : NUDGE_TEXT),
     // An explicit prompt is used exactly as given, without the recovered task
     // appended, because the person running it chose those words.
     custom: Boolean(custom),
-    idleMs: Number.isFinite(idleMs) && idleMs > 0 ? idleMs : DEFAULT_NUDGE_MS,
+    // Force continue: push straight after a finished turn, and stop when the
+    // agent writes its own completion line.
+    force: forced,
+    doneMarker: forced ? overnight.COMPLETE_MARK : null,
+    backoff: !forced,
+    idleMs: forced
+      ? overnight.FORCE_IDLE_MS
+      : (Number.isFinite(idleMs) && idleMs > 0 ? idleMs : DEFAULT_NUDGE_MS),
     max: Number.isFinite(max) && max >= 0 ? max : Infinity,
     resumeMs: Number.isFinite(resumeMs) && resumeMs >= 0 ? resumeMs : DEFAULT_RESUME_MS
   }
@@ -473,6 +489,9 @@ async function runSession (context) {
 
   const sessionId = newSessionId()
   const startedAtMs = Date.now()
+  // Starting a session is the clearest sign the machine should stay on, so a
+  // poweroff armed by a finished task is cancelled here.
+  overnight.cancelShutdown()
 
   // A switch to another account is always an unfinished task, and the new
   // account has none of the conversation: hand the chat itself over and resume
@@ -810,7 +829,13 @@ async function runSession (context) {
         // The live state and the phone are keyed by this, so the screen of a
         // running session can be read from anywhere on the machine.
         sessionId,
-        nudge: { text: nudges.nudgeText, idleMs: nudges.idleMs, max: nudges.max },
+        nudge: {
+          text: nudges.nudgeText,
+          idleMs: nudges.idleMs,
+          max: nudges.max,
+          backoff: nudges.backoff,
+          doneMarker: nudges.doneMarker
+        },
         // Work asked for on the phone: typed into this session as soon as it
         // is idle, so "korjaa se bugi" becomes an actual turn.
         takeTask: () => require('./voice').takeTask(sessionId),
@@ -819,6 +844,14 @@ async function runSession (context) {
         // reused for a couple of seconds: it stats every chat file, and the
         // verification window is measured in seconds anyway.
         progress: () => activityStamp(configDir, cwd, { maxAgeMs: 2000 }),
+        // The agent wrote its own "everything is complete" line: stop pushing
+        // and, with the shutdown timer on, let the poweroff watcher know.
+        onFinished: (info) => {
+          if (!overnight.shutdownTimer()) return false
+          return overnight.armShutdown({
+            pids: [info && info.pid, process.pid].filter(Boolean)
+          })
+        },
         onStuck: (text) => {
           // A message that could not be sent because freebuff ended the session
           // — or hit the turn's usage limit — is a limit, not a broken TUI:
@@ -1093,6 +1126,7 @@ async function runSession (context) {
     answered: ptyRun ? result.answered : null,
     escalated: ptyRun ? result.escalated : null,
     nudges: ptyRun ? result.nudges : null,
+    finished: ptyRun ? Boolean(result.finished) : null,
     resumed: ptyRun ? result.resumed : null,
     enterRetries: ptyRun ? result.enterRetries : null,
     resends: ptyRun ? result.resends : null,
@@ -1135,6 +1169,9 @@ async function runSession (context) {
     stuck: stuckPrompt,
     // The 24/7 loop retries a limit instead of treating it as a finished task.
     limited,
+    // The agent itself said every task is complete (force continue), rather
+    // than merely going quiet.
+    finished: Boolean(result.finished),
     // The screen at the moment the TUI went away: a running turn or an open
     // question means the task was cut off, not finished.
     busyAtExit: Boolean(result.busyAtExit),

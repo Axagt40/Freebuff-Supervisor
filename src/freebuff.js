@@ -4,6 +4,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn, spawnSync } = require('child_process')
 const { defaultConfigDir } = require('./paths')
+const optimize = require('./optimize')
 
 function binaryName () {
   return process.platform === 'win32' ? 'freebuff.exe' : 'freebuff'
@@ -90,6 +91,8 @@ function spawnFreebuff ({ binary, account, args, cwd, onStderr }) {
     env: environmentFor(account),
     stdio: onStderr ? ['inherit', 'inherit', 'pipe'] : 'inherit'
   })
+  // Low-CPU mode: the TUI and everything it runs start below normal priority.
+  optimize.apply(child.pid)
 
   if (onStderr && child.stderr) {
     child.stderr.on('data', (chunk) => {
