@@ -30,23 +30,43 @@ starting work.
 ## Requirements
 
 - **Node.js 18 or newer**
-- **freebuff**, installed separately (`npm install -g freebuff`). The supervisor
-  launches and watches that binary; it does not bundle it.
+- **freebuff**. The supervisor launches and watches that binary; it does not
+  bundle it. `install.sh` installs it for you when it is missing.
 - Optional: `node-pty` for auto-answering dialogs and typing into a session
   (`install.sh` tries to build it; everything else works without it).
 
 ## Install
 
-**From this package folder:**
+One command, nothing to download by hand:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Axagt40/Freebuff-Supervisor/main/install.sh | sh
+```
+
+That fetches the latest release, checks Node, installs the optional dependency,
+puts `sfreebuff` on your `PATH` (and records it in `~/.bashrc`, `~/.zshrc` or
+`~/.profile` so new terminals find it), installs freebuff itself if it is
+missing, and signs in one account. Re-running the same line upgrades in place;
+the program is kept in `~/.local/share/freebuff-supervisor`.
+
+It stops before the browser sign-in with `--no-login`, and answers every prompt
+with `--yes` (or `FREEBUFFS_YES=1`) so it can run unattended:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Axagt40/Freebuff-Supervisor/main/install.sh | sh -s -- --yes
+```
+
+Nothing is started and no session runs until you ask for one.
+
+**From a downloaded package folder** — the same thing, offline:
+
+```bash
+tar -xzf freebuff-supervisor-1.0.1.tgz
+cd package
 sh install.sh
 ```
 
-It checks Node, installs the optional dependency and puts `sfreebuff` on your
-`PATH`. Nothing is started and no account is signed in until you ask.
-
-**From the tarball directly:**
+**With npm**, if you prefer a global install:
 
 ```bash
 npm install -g ./freebuff-supervisor-1.0.1.tgz
