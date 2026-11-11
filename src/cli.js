@@ -12,7 +12,9 @@ const { notifyCommand } = require('./notify')
 const sudo = require('./sudo')
 const dashboard = require('./dashboard')
 const voice = require('./voice')
+const github = require('./github')
 const { requestStop } = require('./supervise')
+const { shortHome } = require('./util')
 
 function printHelp () {
   console.log(`sfreebuff ${pkg.version} — freebuff supervisor
@@ -52,6 +54,11 @@ Usage:
   sfreebuff login [--new]           sign in the next (or a new) account container
   sfreebuff login --account <id>    re-sign an existing container in place
   sfreebuff sudo on|off|status      unlock sudo for sessions, or check the vault
+  sfreebuff github --ask            store a GitHub token in the same vault (typed
+                                     hidden, never in history) so pushes need
+                                     no prompt; 'github status' shows it and
+                                     'github off' forgets it
+  sfreebuff push [git args...]      push with the stored token, no prompt
   sfreebuff status                  accounts, credits, live sessions and vault
   sfreebuff dashboard               the same view, named explicitly (tab picks
                                      a pane)
@@ -114,6 +121,63 @@ function realSudoLabel () {
   return process.env.FREEBUFFS_SUDO_BIN || '/usr/bin/sudo'
 }
 
+/** Read a token from a pipe, so it never lands in the shell history. */
+function readStdin () {
+  return new Promise((resolve) => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk) => {
+      data += chunk
+    })
+    process.stdin.on('end', () => resolve(data.trim()))
+  })
+}
+
+async function githubCommand (argv = []) {
+  const [action, ...rest] = argv
+
+  if (!action || action === 'status') {
+    const stored = github.isActive()
+    console.log(`github token ${stored ? `stored — ${shortHome(github.tokenPath())} (0600)` : 'not stored'}`)
+    console.log(`askpass      ${stored ? shortHome(github.askpassPath()) : 'not present'}`)
+    if (stored) {
+      console.log('push         sfreebuff push [git args...]  (no prompt)')
+    } else {
+      console.log('store one    sfreebuff github --ask   (typed hidden, never in history)')
+    }
+    return 0
+  }
+
+  if (action === 'off') {
+    const removed = github.clear()
+    console.log(removed.length > 0
+      ? 'github token forgotten — pushes prompt again.'
+      : 'no github token was stored.')
+    return 0
+  }
+
+  if (action === 'push') return github.push(rest)
+
+  let token = action
+  if (action === '--ask') {
+    token = await sudo.askHidden('GitHub token (hidden, kept in the vault): ')
+    if (!token) {
+      console.error('sfreebuff: no token given.')
+      return 1
+    }
+  } else if (action === '-') {
+    token = await readStdin()
+    if (!token) {
+      console.error('sfreebuff: no token on stdin.')
+      return 1
+    }
+  }
+
+  github.store(token)
+  console.log(`github token stored — ${shortHome(github.tokenPath())} (0600). Pushes use it now.`)
+  return 0
+}
+
 async function main (argv) {
   const [command, ...rest] = argv
   let exitCode = 0
@@ -165,6 +229,12 @@ async function main (argv) {
     case 'sudo':
       exitCode = sudoCommand(rest)
       break
+    case 'github':
+      exitCode = await githubCommand(rest)
+      break
+    case 'push':
+      exitCode = await github.push(rest)
+      break
     case 'stop': {
       const file = requestStop()
       console.log(`stop requested — a running supervisor stops after its current session (${file}).`)
@@ -182,4 +252,4 @@ async function main (argv) {
   return exitCode
 }
 
-module.exports = { main, printHelp, sudoCommand, realSudoLabel }
+module.exports = { main, printHelp, sudoCommand, githubCommand, realSudoLabel }

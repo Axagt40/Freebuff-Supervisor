@@ -179,6 +179,9 @@ script.
 | `sfreebuff doctor` | check binary, credentials, monitors, logs |
 | `sfreebuff logs [-f] [-n N]` | supervisor log |
 | `sfreebuff sudo on\|off\|status` | sudo vault for sessions |
+| `sfreebuff github --ask` | store a GitHub token in the same vault, typed hidden |
+| `sfreebuff github status\|off` | check the stored token, or forget it |
+| `sfreebuff push [args…]` | push with the stored token, no prompt |
 | `sfreebuff notify <url\|off\|test>` | Discord reports |
 | `sfreebuff voice …` | the phone line (on/off/status/serve/call/url/ntfy/lang/key/persona) |
 | `sfreebuff install` | put the command on `PATH` |
