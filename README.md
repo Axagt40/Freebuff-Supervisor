@@ -1,4 +1,4 @@
-# FREEBUFF SUPERVISOR — v1.0.2
+# FREEBUFF SUPERVISOR — v1.0.3
 
 An unattended supervisor for [freebuff](https://freebuff.com) coding sessions.
 
@@ -13,9 +13,9 @@ dashboard: every account, its credits, and every session, one keypress from
 starting work.
 
 ```
-  FREEBUFFS  supervisor dashboard  v1.0.2                            23:12:04
+  FREEBUFFS  supervisor dashboard  v1.0.3                            23:12:04
 ────────────────────────────────────────────────────────────────────────────
-  FREEBUFF SUPERVISOR v1.0.2 — freebuff sessions, kept running unattended
+  FREEBUFF SUPERVISOR v1.0.3 — freebuff sessions, kept running unattended
   ACCOUNTS  2/2 signed in
    ＋ add account  sign in another freebuff account
    ● account-1    signed in   1 live   6 sess    12m ago        480
@@ -29,7 +29,8 @@ starting work.
 
 ## Requirements
 
-- **Node.js 18 or newer**
+- **Node.js 18 or newer**. `install.sh` installs it for you, without root,
+  when it is missing or too old.
 - **freebuff**. The supervisor launches and watches that binary; it does not
   bundle it. `install.sh` installs it for you when it is missing.
 - Optional: `node-pty` for auto-answering dialogs and typing into a session
@@ -43,11 +44,13 @@ One command, nothing to download by hand:
 curl -fsSL https://raw.githubusercontent.com/Axagt40/Freebuff-Supervisor/main/install.sh | sh
 ```
 
-That fetches the latest release, checks Node, installs the optional dependency,
-puts `sfreebuff` on your `PATH` (and records it in `~/.bashrc`, `~/.zshrc` or
-`~/.profile` so new terminals find it), installs freebuff itself if it is
-missing, and signs in one account. Re-running the same line upgrades in place;
-the program is kept in `~/.local/share/freebuff-supervisor`.
+That fetches the latest release, installs Node 18 or newer when it is missing
+or too old (from the official binaries, into
+`~/.local/share/freebuff-supervisor/node`, so no root is needed), installs
+freebuff when it is missing, installs the optional dependency, puts `sfreebuff`
+on your `PATH` (and records it in `~/.bashrc`, `~/.zshrc` or `~/.profile` so
+new terminals find it), and signs in one account. Re-running the same line
+upgrades in place; the program is kept in `~/.local/share/freebuff-supervisor`.
 
 It stops before the browser sign-in with `--no-login`, and answers every prompt
 with `--yes` (or `FREEBUFFS_YES=1`) so it can run unattended:
@@ -61,7 +64,7 @@ Nothing is started and no session runs until you ask for one.
 **From a downloaded package folder** — the same thing, offline:
 
 ```bash
-tar -xzf freebuff-supervisor-1.0.2.tgz
+tar -xzf freebuff-supervisor-1.0.3.tgz
 cd package
 sh install.sh
 ```
@@ -69,7 +72,7 @@ sh install.sh
 **With npm**, if you prefer a global install:
 
 ```bash
-npm install -g ./freebuff-supervisor-1.0.2.tgz
+npm install -g ./freebuff-supervisor-1.0.3.tgz
 sfreebuff --version
 ```
 
@@ -266,6 +269,19 @@ Frequently used settings: `FREEBUFFS_RESTART_MS`, `FREEBUFFS_STALL_MS`,
 `FREEBUFFS_MAX_CLEAN_RESUMES`, `FREEBUFFS_LIMIT_WAIT_MS`, `FREEBUFFS_SUDO=0`,
 `FREEBUFFS_PTY=0`, `FREEBUFFS_MONITOR_WINDOW=0`, `FREEBUFFS_CREDITS=0`,
 `FREEBUFFS_VOICE_TAILNET_IP` (force the phone link's address, or `off`).
+
+## What's new in 1.0.3
+
+The install and the views now work on a fresh Linux machine.
+
+- **The one-liner installs what is missing.** Node 18 or newer comes from the
+  official binaries into `~/.local/share/freebuff-supervisor/node` with no root
+  needed, freebuff is installed under `~/.local`, and the runtime is linked
+  where the `sfreebuff` launcher can find it.
+- **Terminal windows open on XFCE.** `x-terminal-emulator` on Debian/Ubuntu
+  resolves to `xfce4-terminal`, whose `-x` form is used now.
+- **`sfreebuff` from a menu opens the dashboard**, in a terminal window, instead
+  of printing a snapshot nobody sees.
 
 ## What's new in 1.0.2
 

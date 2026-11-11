@@ -2,6 +2,34 @@
 
 All notable changes to FREEBUFF SUPERVISOR are documented here.
 
+## [1.0.3] — 2026-11-11
+
+Makes the one-command install work on a fresh Linux machine, and the dashboard
+open wherever it is started.
+
+### Fixed
+
+- **The one-liner installs the requirements.** A missing or too-old Node is
+  installed from the official binaries into
+  `~/.local/share/freebuff-supervisor/node` — no root, no package manager — and
+  freebuff is installed with `npm install -g --prefix "$HOME/.local"` when it
+  is missing, falling back to npm's own prefix. Node, npm and npx are also
+  linked into `~/.local/bin`, where the `sfreebuff` launcher lives, so the
+  `#!/usr/bin/env node` shebang works in a shell whose PATH does not include
+  the custom Node folder.
+- **Terminal windows open on Debian/Ubuntu XFCE.** `x-terminal-emulator` is an
+  alternatives symlink that usually points at `xfce4-terminal`, which needs
+  `-x`; the generic name was used with `-e`, so the window never appeared. The
+  program behind the name now chooses the argument style.
+- **`sfreebuff` started from a menu opens the dashboard.** With no terminal
+  attached (an application-menu entry, a `.desktop` file) it reopens itself in
+  a terminal window instead of printing a snapshot to nowhere. A pipe or a
+  redirected file still gets the snapshot.
+
+### Changed
+
+- Version bumped to 1.0.3 in the package, dashboard header and documentation.
+
 ## [1.0.2] — 2026-11-11
 
 A release for long unattended tasks, plus a phone link that opens on the phone.

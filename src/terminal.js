@@ -57,27 +57,43 @@ function which (command, env = process.env) {
  * names something we can find, because that is the terminal the user actually
  * runs; otherwise the first known emulator on PATH is used.
  */
+function styleFor (resolved, name) {
+  // `x-terminal-emulator` is an alternatives symlink. On Debian and Ubuntu
+  // with XFCE it points at xfce4-terminal, which wants `-x`, while the generic
+  // name is listed as `-e`; the wrong form makes the window fail to open. The
+  // program behind the name decides, not the name it was called by.
+  let real = resolved
+  try {
+    real = fs.realpathSync(resolved)
+  } catch {
+    // A broken link still gets the name-based guess below.
+  }
+  const byProgram = LINUX_TERMINALS.find(
+    (entry) => entry.command === path.basename(real)
+  )
+  if (byProgram) {
+    return { command: resolved, style: byProgram.style, extraArgs: byProgram.extraArgs }
+  }
+  const byName = LINUX_TERMINALS.find(
+    (entry) => entry.command === path.basename(String(name || ''))
+  )
+  if (byName) {
+    return { command: resolved, style: byName.style, extraArgs: byName.extraArgs }
+  }
+  // An emulator we do not know: `-e` is the commonest convention.
+  return { command: resolved, style: 'dash-e' }
+}
+
 function findTerminal (env = process.env) {
   const preferred = String((env && env.TERMINAL) || '').trim()
   if (preferred) {
     const resolved = which(preferred, env)
-    if (resolved) {
-      const known = LINUX_TERMINALS.find(
-        (entry) => entry.command === path.basename(preferred)
-      )
-      if (known) {
-        return { command: resolved, style: known.style, extraArgs: known.extraArgs }
-      }
-      // An emulator we do not know: `-e` is the commonest convention.
-      return { command: resolved, style: 'dash-e' }
-    }
+    if (resolved) return styleFor(resolved, preferred)
   }
 
   for (const entry of LINUX_TERMINALS) {
     const resolved = which(entry.command, env)
-    if (resolved) {
-      return { command: resolved, style: entry.style, extraArgs: entry.extraArgs }
-    }
+    if (resolved) return styleFor(resolved, entry.command)
   }
   return null
 }
@@ -153,6 +169,7 @@ module.exports = {
   LINUX_TERMINALS,
   which,
   findTerminal,
+  styleFor,
   argsForStyle,
   shellQuote,
   hasDisplay,

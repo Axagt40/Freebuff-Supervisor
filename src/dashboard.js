@@ -15,6 +15,7 @@
  * logs and reports.
  */
 
+const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const pkg = require('../package.json')
@@ -1026,6 +1027,32 @@ function parseArgs (argv = []) {
 }
 
 /**
+ * A desktop launcher (an application-menu entry, a `.desktop` file) starts the
+ * command with /dev/null for input and output instead of a terminal, so the
+ * snapshot printed there goes nowhere and `sfreebuff` looked like it did
+ * nothing. With a display available the dashboard opens itself in a terminal
+ * window instead. A pipe or a redirected file keeps its snapshot, so
+ * `sfreebuff dashboard | less` still works.
+ */
+function isDevNull (fd) {
+  try {
+    const stat = fs.fstatSync(fd)
+    if (!stat.isCharacterDevice()) return false
+    return stat.rdev === fs.statSync('/dev/null').rdev
+  } catch {
+    return false
+  }
+}
+
+function launchedFromDesktop (stdin, stdout, env = process.env) {
+  if (stdin.isTTY || stdout.isTTY) return false
+  // Only a launcher's /dev/null pair counts: a pipe, a redirected file or a
+  // terminal is someone who can see the snapshot.
+  if (!isDevNull(0) || !isDevNull(1)) return false
+  return Boolean(env && (env.DISPLAY || env.WAYLAND_DISPLAY))
+}
+
+/**
  * The dashboard. On a terminal it takes over the screen and reacts to keys; in
  * a pipe it prints one snapshot and returns, so it also reads in scripts.
  */
@@ -1044,6 +1071,17 @@ async function run (argv = []) {
   })
 
   if (!stdin.isTTY || !stdout.isTTY) {
+    if (launchedFromDesktop(stdin, stdout)) {
+      const plan = launchPlan({ args: ['dashboard'], cwd: process.cwd() })
+      if (plan) {
+        try {
+          spawn(plan.command, plan.args, plan.options).unref()
+          return 0
+        } catch {
+          // No window after all: fall back to the snapshot below.
+        }
+      }
+    }
     const state = loadState()
     const balances = await credits.getAll(state.accounts.filter(accounts.isSignedIn))
     const model = collect({ balances })
@@ -1549,6 +1587,7 @@ module.exports = {
   stopSession,
   keyActions,
   parseArgs,
+  launchedFromDesktop,
   sessionCwd,
   MAX_ACCOUNT_ROWS,
   MAX_SESSION_ROWS
