@@ -1,5 +1,11 @@
 node_modules/
 dist/
 .state/
+.freebuff/
 *.tgz
 *.log
+
+# maintainer working files: never part of the shipped product
+plan.txt
+Bublic-relase.txt
+bench-live.js

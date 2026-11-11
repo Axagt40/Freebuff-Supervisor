@@ -515,14 +515,14 @@ test('a status speaks the count and writes the paths instead of reading them', (
     accounts: 1,
     live: 1,
     sessions: ['account-4, käynnissä 51m19s'],
-    sessionDetails: ['account-4 · /media/axagt40/SDCARD · 51m19s'],
+    sessionDetails: ['account-4 · /media/me/SDCARD · 51m19s'],
     pending: []
   }
 
   const { speech, detail } = voice.statusParts(snap)
   assert.match(speech, /1 istunto käynnissä/)
   assert.doesNotMatch(speech, /\/media|Sdcard/i, 'the folder is never spoken')
-  assert.match(detail, /\/media\/axagt40\/Sdcard/i)
+  assert.match(detail, /\/media\/me\/Sdcard/i)
 })
 
 test('the phone page has one voice picker and a talk button that moves', () => {
